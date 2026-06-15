@@ -21,7 +21,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "__HOME__/.local/bin/headroom init hook ensure --profile init-user --marker headroom-init-claude",
+            "command": "test -d __HOME__/.headroom/deploy/init-user || __HOME__/.local/bin/headroom init hook ensure --profile init-user --marker headroom-init-claude",
             "timeout": 15
           }
         ]
