@@ -1,0 +1,88 @@
+#!/usr/bin/env bash
+# headroom-watch — live compression stats for the headroom proxy
+#
+# Usage:
+#   headroom-watch            # refresh every 5s (live dashboard)
+#   headroom-watch -n 2       # refresh every 2s
+#   headroom-watch --once     # print one snapshot and exit
+#   headroom-watch --raw      # dump raw /stats JSON and exit
+#
+# Reads the proxy's /stats endpoint. Override host/port with HEADROOM_URL.
+
+set -euo pipefail
+
+URL="${HEADROOM_URL:-http://127.0.0.1:8787}"
+INTERVAL=5
+ONCE=0
+RAW=0
+
+while [ $# -gt 0 ]; do
+  case "$1" in
+    -n|--interval) INTERVAL="${2:?-n needs a value}"; shift 2 ;;
+    --once)        ONCE=1; shift ;;
+    --raw)         RAW=1; shift ;;
+    -h|--help)
+      awk 'NR==1{next} /^#/{sub(/^# ?/,""); print; next} {exit}' "$0"
+      exit 0 ;;
+    *) echo "unknown arg: $1" >&2; exit 2 ;;
+  esac
+done
+
+fetch() { curl -fsS --max-time 4 "$URL/stats" 2>/dev/null; }
+
+if [ "$RAW" = 1 ]; then
+  fetch | jq .
+  exit 0
+fi
+
+render() {
+  local json health hup
+  json="$(fetch || true)"
+  health="$(curl -fsS --max-time 4 "$URL/health" 2>/dev/null || true)"
+
+  if [ -z "$json" ]; then
+    printf '\n  \033[31m✗ headroom proxy unreachable at %s\033[0m\n' "$URL"
+    printf '    is the service up?  systemctl --user status headroom-proxy\n\n'
+    return
+  fi
+
+  hup="$(printf '%s' "$health" | jq -r '.uptime_seconds // empty' 2>/dev/null || true)"
+
+  printf '%s' "$json" | jq -r --arg up "$hup" '
+    def n: . // 0;
+    def fmt: n | tostring;
+    .summary as $s
+    | $s.compression as $c
+    | "[1m  headroom \(.summary.mode // "?") mode[0m  ·  model \($s.primary_model // "?")"
+      + (if ($up|length)>0 then "  ·  up \(($up|tonumber|floor/60*10|floor)/10)m" else "" end),
+      "  ────────────────────────────────────────────────",
+      "  api requests          \($s.api_requests | fmt)",
+      "  requests compressed   \($c.requests_compressed | fmt)   (avg \($c.avg_compression_pct|n)% · best \($c.best_compression_pct|n)%)",
+      "  best event            \($c.best_detail // "—")",
+      "  tokens removed        \($c.total_tokens_removed | fmt)",
+      "  cost saved            $\($s.cost.total_saved_usd|n)  (\($s.cost.savings_pct|n)% · cache $\($s.cost.breakdown.cache_savings_usd|n))",
+      "",
+      "  uncompressed breakdown:",
+      "    prefix_frozen       \($s.uncompressed_requests.prefix_frozen | fmt)",
+      "    too_small           \($s.uncompressed_requests.too_small | fmt)",
+      "    passthrough         \($s.uncompressed_requests.passthrough | fmt)",
+      "    no_compressible     \($s.uncompressed_requests.no_compressible_content | fmt)",
+      "",
+      "  mcp: compressions \($s.mcp.compressions|fmt) · tokens_removed \($s.mcp.tokens_removed|fmt) · retrievals \($s.mcp.retrievals|fmt)"
+  ' 2>/dev/null || { printf '  \033[33m! could not parse /stats\033[0m\n'; printf '%s\n' "$json" | head -c 300; }
+}
+
+if [ "$ONCE" = 1 ]; then
+  render
+  exit 0
+fi
+
+# live loop
+trap 'printf "\033[?25h\n"; exit 0' INT TERM
+printf '\033[?25l'  # hide cursor
+while true; do
+  printf '\033[2J\033[H'  # clear + home
+  printf '  \033[2m%s  (every %ss, Ctrl-C to quit)\033[0m\n' "$(date '+%H:%M:%S')" "$INTERVAL"
+  render
+  sleep "$INTERVAL"
+done

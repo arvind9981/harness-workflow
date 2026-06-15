@@ -1,0 +1,15 @@
+# Never commit secrets or local state — this repo is workflow config only.
+*.credentials*
+.credentials.json
+*token*
+*secret*
+*.key
+*.pem
+
+# Backups created by init.sh
+*.bak-init-*
+*.bak
+
+# OS / editor noise
+.DS_Store
+*.swp

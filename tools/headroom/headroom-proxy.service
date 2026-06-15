@@ -1,0 +1,16 @@
+[Unit]
+Description=Headroom context-optimization proxy (CCR backend for Claude Code MCP)
+Documentation=https://github.com/chopratejas/headroom
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=%h/.local/bin/headroom proxy --port 8787 --host 127.0.0.1
+Restart=on-failure
+RestartSec=3
+# The proxy backs the headroom MCP retrieve/compress tools AND serves the
+# ANTHROPIC_BASE_URL routing configured in claude/settings.json (127.0.0.1:8787).
+
+[Install]
+WantedBy=default.target
