@@ -8,6 +8,8 @@ model_list:
       model: ollama_chat/qwen3.6:latest
       api_base: http://127.0.0.1:11434
       think: false             # disable qwen3.6 thinking for fast, clean summaries
+      num_ctx: 32768           # cap context: the model's 256K default makes ollama's prompt-cache
+                               # checkpoint search cost 10-60s/call on this SWA model. 32K = ~1s/call.
 
 litellm_settings:
   drop_params: true            # silently drop params the ollama backend doesn't accept
