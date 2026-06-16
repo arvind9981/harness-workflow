@@ -116,8 +116,11 @@ command -v uv >/dev/null 2>&1 && ok "uv present ($(uv --version 2>/dev/null))"
 
 # ---------------------------------------------------------------------------
 step "Install headroom"
-uv tool install --upgrade headroom-ai >/dev/null 2>&1 && ok "headroom-ai installed/upgraded" \
-  || die "uv tool install headroom-ai failed"
+# The [proxy] extra (fastapi/uvicorn) is REQUIRED — the systemd/launchd service runs
+# `headroom proxy`, which exits 1 without it. Plain `headroom-ai` leaves :8787 unbound
+# and Claude Code (ANTHROPIC_BASE_URL -> 127.0.0.1:8787) fails with ConnectionRefused.
+uv tool install --upgrade 'headroom-ai[proxy]' >/dev/null 2>&1 && ok "headroom-ai[proxy] installed/upgraded" \
+  || die "uv tool install 'headroom-ai[proxy]' failed"
 
 # ---------------------------------------------------------------------------
 step "Install scripts"
