@@ -24,7 +24,8 @@ claude          # auto-installs plugins from settings.json; log in when prompted
   superpowers, claude-mem, headroom, frontend-design, github, karpathy-skills.
 - **headroom** — installed as a `uv` tool (`headroom-ai`), plus:
   - `tools/headroom/headroom-watch` → `~/.local/bin/` (live compression stats)
-  - `tools/headroom/headroom-proxy.service` → systemd user service (auto-start)
+  - `tools/headroom/headroom-proxy.service` → systemd user service (Linux) /
+    `com.user.headroom-proxy.plist` → launchd LaunchAgent (macOS), both auto-start
 - **Local-model claude-mem routing** — claude-mem generates its observations on a
   local model instead of the cloud (zero rate limits, zero cost). See below.
 
@@ -38,7 +39,8 @@ claude-mem  →  ANTHROPIC_BASE_URL=127.0.0.1:4000  →  LiteLLM gateway  →  O
 
 - installs `litellm` as a `uv` tool,
 - `tools/litellm/qwen-proxy.yaml` → `~/.config/litellm/` (loopback-only, no secrets),
-- `tools/litellm/litellm-qwen.service` → systemd user service (auto-start on :4000),
+- `tools/litellm/litellm-qwen.service` → systemd user service (Linux) /
+  `com.user.litellm-qwen.plist` → launchd LaunchAgent (macOS), auto-start on :4000,
 - and surgically sets three keys in `~/.claude-mem/.env`
   (`ANTHROPIC_BASE_URL`, `CLAUDE_MEM_PROVIDER=claude`,
   `CLAUDE_MEM_CLAUDE_AUTH_METHOD=gateway`) — backing the file up first and leaving
@@ -51,7 +53,8 @@ claude-mem  →  ANTHROPIC_BASE_URL=127.0.0.1:4000  →  LiteLLM gateway  →  O
 - `ollama pull qwen3.6:latest` (~23 GB).
 
 `init.sh` detects these and prints instructions if missing; the gateway starts
-serving as soon as the model is present (`systemctl --user restart litellm-qwen`).
+serving as soon as the model is present (`systemctl --user restart litellm-qwen`
+on Linux, `launchctl kickstart -k gui/$(id -u)/com.user.litellm-qwen` on macOS).
 
 ## What it deliberately does NOT do
 
@@ -62,8 +65,11 @@ serving as soon as the model is present (`systemctl --user restart litellm-qwen`
 
 ## Requirements
 
-`git`, `curl`, `jq`, and `systemctl --user` (Linux). `uv` is installed for you if
-missing. Claude Code itself must be installed separately.
+`git`, `curl`, `jq`. The two proxies run as background services: `systemd --user`
+on **Linux**, `launchd` LaunchAgents (`launchctl`) on **macOS** — `init.sh` picks
+the right one automatically. `uv` is installed for you if missing; on macOS install
+`jq` via Homebrew (`brew install jq`). Claude Code itself must be installed
+separately.
 
 ## Safety
 

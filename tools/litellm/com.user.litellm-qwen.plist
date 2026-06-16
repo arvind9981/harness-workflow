@@ -1,0 +1,43 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- LiteLLM gateway: Anthropic /v1/messages -> local Ollama (qwen3.6), for claude-mem
+     (macOS launchd LaunchAgent). Linux equivalent: litellm-qwen.service.
+     __HOME__ is rendered to $HOME by init.sh. Serves on 127.0.0.1:4000. -->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.user.litellm-qwen</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>__HOME__/.local/bin/litellm</string>
+    <string>--config</string>
+    <string>__HOME__/.config/litellm/qwen-proxy.yaml</string>
+    <string>--port</string>
+    <string>4000</string>
+    <string>--host</string>
+    <string>127.0.0.1</string>
+  </array>
+  <!-- launchd does not inherit the login shell PATH; spell it out so uv-installed
+       tools and Homebrew binaries resolve. -->
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key>
+    <string>__HOME__/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
+  </dict>
+  <key>RunAtLoad</key>
+  <true/>
+  <!-- Restart on crash only (== systemd Restart=on-failure). Keeps retrying until
+       ollama + qwen3.6 are present, same as the Linux unit. -->
+  <key>KeepAlive</key>
+  <dict>
+    <key>SuccessfulExit</key>
+    <false/>
+  </dict>
+  <key>ThrottleInterval</key>
+  <integer>3</integer>
+  <key>StandardOutPath</key>
+  <string>__HOME__/Library/Logs/litellm-qwen.log</string>
+  <key>StandardErrorPath</key>
+  <string>__HOME__/Library/Logs/litellm-qwen.log</string>
+</dict>
+</plist>
