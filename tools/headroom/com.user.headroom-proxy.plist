@@ -1,0 +1,42 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- Headroom context-optimization proxy (macOS launchd LaunchAgent).
+     Linux equivalent: headroom-proxy.service. __HOME__ is rendered to $HOME by init.sh.
+     Backs the headroom MCP tools AND serves the ANTHROPIC_BASE_URL routing
+     configured in claude/settings.json (127.0.0.1:8787). -->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.user.headroom-proxy</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>__HOME__/.local/bin/headroom</string>
+    <string>proxy</string>
+    <string>--port</string>
+    <string>8787</string>
+    <string>--host</string>
+    <string>127.0.0.1</string>
+  </array>
+  <!-- launchd does not inherit the login shell PATH; spell it out so uv-installed
+       tools and Homebrew binaries resolve. -->
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key>
+    <string>__HOME__/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
+  </dict>
+  <key>RunAtLoad</key>
+  <true/>
+  <!-- Restart on crash only (== systemd Restart=on-failure). -->
+  <key>KeepAlive</key>
+  <dict>
+    <key>SuccessfulExit</key>
+    <false/>
+  </dict>
+  <key>ThrottleInterval</key>
+  <integer>3</integer>
+  <key>StandardOutPath</key>
+  <string>__HOME__/Library/Logs/headroom-proxy.log</string>
+  <key>StandardErrorPath</key>
+  <string>__HOME__/Library/Logs/headroom-proxy.log</string>
+</dict>
+</plist>

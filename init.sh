@@ -13,11 +13,25 @@ set -euo pipefail
 # ---------------------------------------------------------------------------
 REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 STAMP="$(date +%Y%m%d-%H%M%S)"
+OS="$(uname -s)"                           # Linux | Darwin
 CLAUDE_DIR="$HOME/.claude"
 BIN_DIR="$HOME/.local/bin"
-UNIT_DIR="$HOME/.config/systemd/user"
+UNIT_DIR="$HOME/.config/systemd/user"      # systemd user units (Linux)
+LAUNCH_DIR="$HOME/Library/LaunchAgents"    # launchd LaunchAgents (macOS)
 LITELLM_DIR="$HOME/.config/litellm"
 MEM_DIR="$HOME/.claude-mem"
+
+# OS-derived hint strings shown to the user (the service manager differs per OS).
+case "$OS" in
+  Darwin)
+    STATUS_HR="launchctl list | grep headroom-proxy"
+    STATUS_LL="launchctl list | grep litellm-qwen"
+    RESTART_LL="launchctl kickstart -k gui/$(id -u)/com.user.litellm-qwen" ;;
+  *)
+    STATUS_HR="systemctl --user status headroom-proxy"
+    STATUS_LL="systemctl --user status litellm-qwen"
+    RESTART_LL="systemctl --user restart litellm-qwen" ;;
+esac
 
 c_grn=$'\033[32m'; c_yel=$'\033[33m'; c_red=$'\033[31m'; c_dim=$'\033[2m'; c_rst=$'\033[0m'
 ok()   { printf '  %s✓%s %s\n' "$c_grn" "$c_rst" "$1"; }
@@ -31,15 +45,42 @@ backup() {  # backup <path> — copy aside if it exists and differs from what we
   return 0
 }
 
+sed_inplace() {  # sed_inplace <expr> <file> — portable in-place edit (GNU vs BSD/macOS sed)
+  if [ "$OS" = "Darwin" ]; then sed -i '' "$1" "$2"; else sed -i "$1" "$2"; fi
+}
+
 upsert_env() {  # upsert_env <file> <KEY> <VALUE> — set KEY=VALUE, replacing or appending; other lines untouched
   local f="$1" k="$2" v="$3"
   touch "$f"
   # ensure file ends with a newline before we append
   [ -s "$f" ] && [ "$(tail -c1 "$f" | wc -l)" -eq 0 ] && printf '\n' >> "$f"
   if grep -qE "^${k}=" "$f"; then
-    sed -i "s#^${k}=.*#${k}=${v}#" "$f"
+    sed_inplace "s#^${k}=.*#${k}=${v}#" "$f"
   else
     printf '%s=%s\n' "$k" "$v" >> "$f"
+  fi
+}
+
+svc_enable() {  # svc_enable <linux_unit_file> <mac_plist_file> — install + start a background service
+  local linux_unit="$1" mac_plist="$2"
+  if [ "$OS" = "Darwin" ]; then
+    mkdir -p "$LAUNCH_DIR" "$HOME/Library/Logs"
+    local dest; dest="$LAUNCH_DIR/$(basename "$mac_plist")"
+    backup "$dest"
+    sed "s#__HOME__#$HOME#g" "$mac_plist" > "$dest"   # launchd has no %h specifier
+    launchctl unload "$dest" 2>/dev/null || true
+    launchctl load -w "$dest" \
+      && ok "$(basename "$dest") loaded (launchd)" \
+      || die "launchctl load failed for $(basename "$dest")"
+  else
+    mkdir -p "$UNIT_DIR"
+    local unit; unit="$(basename "$linux_unit")"
+    backup "$UNIT_DIR/$unit"
+    cp "$linux_unit" "$UNIT_DIR/$unit"
+    systemctl --user daemon-reload
+    systemctl --user enable --now "$unit" \
+      && ok "$unit enabled and started (systemd)" \
+      || die "systemctl enable failed for $unit"
   fi
 }
 
@@ -47,8 +88,15 @@ upsert_env() {  # upsert_env <file> <KEY> <VALUE> — set KEY=VALUE, replacing o
 step "Prerequisites"
 missing=()
 for c in git curl jq; do command -v "$c" >/dev/null 2>&1 || missing+=("$c"); done
-command -v systemctl >/dev/null 2>&1 || warn "systemctl not found — the headroom proxy service step will be skipped"
-[ "${#missing[@]}" -eq 0 ] || die "install these first via your package manager: ${missing[*]}"
+if [ "$OS" = "Darwin" ]; then
+  command -v launchctl >/dev/null 2>&1 || warn "launchctl not found — the proxy service steps will be skipped"
+else
+  command -v systemctl >/dev/null 2>&1 || warn "systemctl not found — the proxy service steps will be skipped"
+fi
+if [ "${#missing[@]}" -ne 0 ]; then
+  if [ "$OS" = "Darwin" ]; then die "install these first: brew install ${missing[*]}"
+  else die "install these first via your package manager: ${missing[*]}"; fi
+fi
 ok "git, curl, jq present"
 
 # uv (only nonstandard dep — needed to install headroom)
@@ -99,16 +147,11 @@ fi
 
 # ---------------------------------------------------------------------------
 step "Headroom proxy service"
-if command -v systemctl >/dev/null 2>&1; then
-  mkdir -p "$UNIT_DIR"
-  backup "$UNIT_DIR/headroom-proxy.service"
-  cp "$REPO_DIR/tools/headroom/headroom-proxy.service" "$UNIT_DIR/headroom-proxy.service"
-  systemctl --user daemon-reload
-  systemctl --user enable --now headroom-proxy.service
-  ok "headroom-proxy.service enabled and started"
-  info "tip: 'loginctl enable-linger $USER' keeps the proxy alive without an active login"
+if { [ "$OS" = "Darwin" ] && command -v launchctl >/dev/null 2>&1; } || command -v systemctl >/dev/null 2>&1; then
+  svc_enable "$REPO_DIR/tools/headroom/headroom-proxy.service" "$REPO_DIR/tools/headroom/com.user.headroom-proxy.plist"
+  [ "$OS" = "Darwin" ] || info "tip: 'loginctl enable-linger $USER' keeps the proxy alive without an active login"
 else
-  warn "skipped (no systemctl). Run manually: headroom proxy --port 8787 --host 127.0.0.1"
+  warn "skipped (no service manager). Run manually: headroom proxy --port 8787 --host 127.0.0.1"
 fi
 
 # ---------------------------------------------------------------------------
@@ -134,15 +177,10 @@ fi
 
 # ---------------------------------------------------------------------------
 step "litellm proxy service"
-if command -v systemctl >/dev/null 2>&1; then
-  mkdir -p "$UNIT_DIR"
-  backup "$UNIT_DIR/litellm-qwen.service"
-  cp "$REPO_DIR/tools/litellm/litellm-qwen.service" "$UNIT_DIR/litellm-qwen.service"
-  systemctl --user daemon-reload
-  systemctl --user enable --now litellm-qwen.service
-  ok "litellm-qwen.service enabled and started"
+if { [ "$OS" = "Darwin" ] && command -v launchctl >/dev/null 2>&1; } || command -v systemctl >/dev/null 2>&1; then
+  svc_enable "$REPO_DIR/tools/litellm/litellm-qwen.service" "$REPO_DIR/tools/litellm/com.user.litellm-qwen.plist"
 else
-  warn "skipped (no systemctl). Run manually: litellm --config $LITELLM_DIR/qwen-proxy.yaml --port 4000 --host 127.0.0.1"
+  warn "skipped (no service manager). Run manually: litellm --config $LITELLM_DIR/qwen-proxy.yaml --port 4000 --host 127.0.0.1"
 fi
 
 # ---------------------------------------------------------------------------
@@ -164,12 +202,12 @@ if curl -fsS --max-time 5 http://127.0.0.1:8787/health >/dev/null 2>&1; then
   ok "headroom proxy healthy at http://127.0.0.1:8787"
   command -v headroom-watch >/dev/null 2>&1 && info "run 'headroom-watch' to watch compression live"
 else
-  warn "headroom proxy not answering yet — check: systemctl --user status headroom-proxy"
+  warn "headroom proxy not answering yet — check: $STATUS_HR"
 fi
 if curl -fsS --max-time 4 http://127.0.0.1:4000/health/readiness >/dev/null 2>&1; then
   ok "litellm gateway healthy at http://127.0.0.1:4000"
 else
-  warn "litellm gateway not ready yet — needs ollama + qwen3.6; check: systemctl --user status litellm-qwen"
+  warn "litellm gateway not ready yet — needs ollama + qwen3.6; check: $STATUS_LL"
 fi
 
 cat <<EOF
@@ -179,5 +217,5 @@ ${c_grn}Done.${c_rst} Next:
   2) Log in when prompted (no tokens were copied by this repo).
   3) Optional: ${c_dim}headroom-watch${c_rst} to monitor token compression.
   4) For local-model claude-mem: install Ollama + ${c_dim}ollama pull qwen3.6:latest${c_rst} (~23 GB),
-     then ${c_dim}systemctl --user restart litellm-qwen${c_rst}.
+     then ${c_dim}${RESTART_LL}${c_rst}.
 EOF
