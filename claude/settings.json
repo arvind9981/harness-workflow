@@ -11,6 +11,12 @@
             "type": "command",
             "command": "__HOME__/.local/bin/headroom init hook ensure --profile init-user --marker headroom-init-claude",
             "timeout": 15
+          },
+          {
+            "type": "command",
+            "command": "__HOME__/.claude/hooks/mempalace-context.sh",
+            "timeout": 12,
+            "statusMessage": "Loading project memory (mempalace)…"
           }
         ]
       }
