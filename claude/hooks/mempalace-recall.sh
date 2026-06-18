@@ -6,8 +6,8 @@
 # can't crowd out diverse memory. Emits nothing (exit 0, no stdout) when there's no
 # prompt, the prompt is trivial, or nothing clears the floor — so it never adds noise.
 #
-# Replaces claude-mem-recall.sh as the auto-recall source. Reversible: re-point
-# settings.json back if needed. Tunables via env (MEMPALACE_RECALL_*).
+# The auto-recall source for this setup. Reversible: re-point settings.json back
+# if needed. Tunables via env (MEMPALACE_RECALL_*).
 
 MEMPALACE="$HOME/.local/bin/mempalace"
 [ -x "$MEMPALACE" ] || exit 0
