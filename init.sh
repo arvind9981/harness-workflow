@@ -173,9 +173,10 @@ else
 fi
 
 # ---------------------------------------------------------------------------
-step "mempalace prune scheduler (weekly)"
-# The Stop hook mines the whole session dir, so it re-ingests tool-result/subagent
-# noise over time. A weekly job prunes it (see tools/mempalace/mempalace-prune.py).
+step "mempalace prune scheduler (daily)"
+# The Stop hook mines the whole session dir in convos mode (which ignores .gitignore
+# and has no exclude), so it re-ingests tool-result/subagent noise that can only be
+# removed after ingest. A daily job prunes it (see tools/mempalace/mempalace-prune.py).
 mkdir -p "$HOME/.mempalace/logs"
 if [ "$OS" = "Darwin" ] && command -v launchctl >/dev/null 2>&1; then
   dest="$LAUNCH_DIR/com.user.mempalace-prune.plist"
@@ -183,7 +184,7 @@ if [ "$OS" = "Darwin" ] && command -v launchctl >/dev/null 2>&1; then
   backup "$dest"
   sed "s#__HOME__#$HOME#g" "$REPO_DIR/tools/mempalace/com.user.mempalace-prune.plist" > "$dest"
   launchctl unload "$dest" >/dev/null 2>&1 || true
-  launchctl load -w "$dest" && ok "weekly prune scheduled (launchd, Sun 03:47)" \
+  launchctl load -w "$dest" && ok "daily prune scheduled (launchd, 03:47)" \
     || warn "could not load prune plist"
 elif command -v systemctl >/dev/null 2>&1; then
   mkdir -p "$UNIT_DIR"
@@ -193,10 +194,10 @@ elif command -v systemctl >/dev/null 2>&1; then
   done
   systemctl --user daemon-reload
   systemctl --user enable --now mempalace-prune.timer \
-    && ok "weekly prune scheduled (systemd timer, Sun 03:47)" \
+    && ok "daily prune scheduled (systemd timer, 03:47)" \
     || warn "could not enable mempalace-prune.timer"
 else
-  warn "skipped (no scheduler). Run weekly: mempalace's python on $BIN_DIR/mempalace-prune.py"
+  warn "skipped (no scheduler). Run daily: mempalace's python on $BIN_DIR/mempalace-prune.py"
 fi
 
 # ---------------------------------------------------------------------------

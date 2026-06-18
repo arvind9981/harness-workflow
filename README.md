@@ -13,63 +13,73 @@ claude          # auto-installs plugins from settings.json; log in when prompted
 ## What it sets up
 
 - **Claude settings** (`claude/settings.json`) — enabled plugins, marketplaces,
-  headroom proxy routing (`ANTHROPIC_BASE_URL=127.0.0.1:8787`), and hooks. Paths
-  are stored as `__HOME__` and resolved to your real `$HOME` on install.
-- **Permissions allowlist** (`claude/settings.local.json`) — 253 generic
-  command allows, sanitized of any machine/project-specific paths.
+  headroom proxy routing (`ANTHROPIC_BASE_URL=127.0.0.1:8787`), and lifecycle
+  hooks. Paths are stored as `__HOME__` and resolved to your real `$HOME` on
+  install.
+- **Permissions allowlist** (`claude/settings.local.json`) — a snapshot of my
+  personal allow rules. It carries host-specific entries (audio, ASUS/KDE,
+  sysfs paths) that are harmless on another machine but are *not* curated to be
+  universal; treat it as a starting point, not a sanitized generic list.
 - **Global instructions** (`claude/CLAUDE.md`) — standing cross-project
   preferences, installed to `~/.claude/CLAUDE.md` (backed up first).
 - **Plugins** — *not* vendored. Claude Code installs them itself on first launch
-  from the marketplaces declared in `settings.json`:
-  superpowers, claude-mem, headroom, frontend-design, github, karpathy-skills.
-- **headroom** — installed as a `uv` tool (`headroom-ai`), plus:
+  from the marketplaces declared in `settings.json`: superpowers,
+  frontend-design, github, headroom, mempalace, karpathy-skills.
+- **headroom** (transport) — a local context-compression proxy in front of the
+  Anthropic API. Installed as a `uv` tool (`headroom-ai[proxy]`), plus:
   - `tools/headroom/headroom-watch` → `~/.local/bin/` (live compression stats)
   - `tools/headroom/headroom-proxy.service` → systemd user service (Linux) /
     `com.user.headroom-proxy.plist` → launchd LaunchAgent (macOS), both auto-start
-- **Local-model claude-mem routing** — claude-mem generates its observations on a
-  local model instead of the cloud (zero rate limits, zero cost). See below.
+    and serve `127.0.0.1:8787`.
+- **mempalace** (memory) — the local-first, verbatim, zero-API memory layer.
+  Installed as a `uv` tool (`mempalace`, with the native `mempalace-mcp` server),
+  loaded as a Claude Code plugin, plus a daily junk-drawer prune
+  (`tools/mempalace/mempalace-prune.py` via systemd timer / launchd plist).
 
-## Local-model claude-mem routing
+## Memory layer — mempalace
 
+Retrieval is fully local (local embeddings, no API calls). The wiring:
+
+- **Capture** is automatic via the mempalace *plugin's* `Stop` / `PreCompact`
+  hooks, which mine the session into the palace.
+- **Recall** is wired two ways through repo hooks in `settings.json`:
+  - `SessionStart` → `claude/hooks/mempalace-context.sh` injects a project-scoped
+    "wake-up" summary (identity + the essential story for the current wing).
+  - `UserPromptSubmit` → `claude/hooks/mempalace-recall.sh` injects the verbatim
+    drawers most relevant to each prompt (semantic + bm25, over-fetched then
+    filtered by a similarity floor and a per-source cap).
+  - Plus the mempalace MCP tools (search / traverse / kg_query) on demand.
+
+**One-time seed** (network/disk-heavy, so `init.sh` guides rather than auto-runs):
+
+```bash
+mempalace init "$HOME"                              # create the global palace
+mempalace mine ~/.claude/projects/ --mode convos   # seed memory from transcripts
 ```
-claude-mem  →  ANTHROPIC_BASE_URL=127.0.0.1:4000  →  LiteLLM gateway  →  Ollama (qwen3.6) on :11434
-```
 
-`init.sh` wires up the portable pieces automatically:
+The embedding model (~300 MB) downloads lazily on the first embedding op. LLM
+entity-refinement is optional (`--llm-model gemma4:e4b` via Ollama, or
+`--no-llm` for heuristics only); recall itself never needs it.
 
-- installs `litellm` as a `uv` tool,
-- `tools/litellm/qwen-proxy.yaml` → `~/.config/litellm/` (loopback-only, no secrets),
-- `tools/litellm/litellm-qwen.service` → systemd user service (Linux) /
-  `com.user.litellm-qwen.plist` → launchd LaunchAgent (macOS), auto-start on :4000,
-- and surgically sets three keys in `~/.claude-mem/.env`
-  (`ANTHROPIC_BASE_URL`, `CLAUDE_MEM_PROVIDER=claude`,
-  `CLAUDE_MEM_CLAUDE_AUTH_METHOD=gateway`) — backing the file up first and leaving
-  every other line, including your API keys, untouched. Skipped if claude-mem
-  isn't installed yet; just re-run `init.sh` after your first `claude` launch.
-
-**Prerequisites (not auto-installed — heavyweight & hardware-specific):**
-
-- [Ollama](https://ollama.com) installed and running, and
-- `ollama pull qwen3.6:latest` (~23 GB).
-
-`init.sh` detects these and prints instructions if missing; the gateway starts
-serving as soon as the model is present (`systemctl --user restart litellm-qwen`
-on Linux, `launchctl kickstart -k gui/$(id -u)/com.user.litellm-qwen` on macOS).
+**Why the daily prune?** The plugin's `Stop` hook re-mines the whole session dir
+in `convos` mode — which ignores `.gitignore` and has no exclude flag — so it
+re-ingests tool-result / subagent noise that can only be removed *after* ingest.
+The daily prune (03:47 local) strips it so it doesn't pollute recall.
 
 ## What it deliberately does NOT do
 
 - **No secrets.** No OAuth tokens, API keys, or `.credentials.json`. You log in
   interactively after install.
-- **No memory/history.** Your claude-mem observations and `memory/*.md` rebuild
-  on the new machine as you work.
+- **No memory/history.** Your mempalace palace and `memory/*.md` rebuild on the
+  new machine as you work (and via the one-time seed above).
 
 ## Requirements
 
-`git`, `curl`, `jq`. The two proxies run as background services: `systemd --user`
-on **Linux**, `launchd` LaunchAgents (`launchctl`) on **macOS** — `init.sh` picks
-the right one automatically. `uv` is installed for you if missing; on macOS install
-`jq` via Homebrew (`brew install jq`). Claude Code itself must be installed
-separately.
+`git`, `curl`, `jq`, and `uv` (installed for you if missing). The headroom proxy
+runs as a background service: `systemd --user` on **Linux**, a `launchd`
+LaunchAgent on **macOS** — `init.sh` picks the right one automatically. On macOS,
+install `jq` via Homebrew (`brew install jq`). Claude Code itself must be
+installed separately.
 
 ## Safety
 
