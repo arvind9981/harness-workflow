@@ -110,6 +110,34 @@ command -v mempalace-mcp >/dev/null 2>&1 && ok "mempalace-mcp (native MCP) prese
   || warn "mempalace-mcp missing — MCP wiring will fail"
 
 # ---------------------------------------------------------------------------
+step "Install graphify (code knowledge graph)"
+# graphify turns a repo into a queryable graph; a self-guarding PreToolUse hook
+# (shipped in claude/settings.json) redirects search to the graph when one exists.
+# PyPI package is 'graphifyy' (double-y); the CLI is 'graphify'. Builds extract via
+# Claude subagents through the headroom proxy (no ollama, nothing to pin).
+uv tool install --upgrade graphifyy >/dev/null 2>&1 && ok "graphifyy installed/upgraded" \
+  || die "uv tool install graphifyy failed"
+command -v graphify >/dev/null 2>&1 && ok "graphify CLI present" \
+  || warn "graphify missing — skill registration will be skipped"
+
+# ---------------------------------------------------------------------------
+step "Ignore graphify artifacts globally"
+# graphify writes a per-repo graphify-out/ (graph.json, report, html, cache). Ignore
+# it globally so it never gets committed in any repo.
+GI="${XDG_CONFIG_HOME:-$HOME/.config}/git/ignore"
+mkdir -p "$(dirname "$GI")"
+if ! { [ -f "$GI" ] && grep -qxF 'graphify-out/' "$GI"; }; then
+  backup "$GI"
+  printf 'graphify-out/\n' >> "$GI"
+  ok "graphify-out/ added to $GI"
+else
+  ok "graphify-out/ already ignored in $GI"
+fi
+if [ -z "$(git config --global core.excludesFile 2>/dev/null)" ]; then
+  git config --global core.excludesFile "$GI" && info "set core.excludesFile=$GI"
+fi
+
+# ---------------------------------------------------------------------------
 step "Install scripts"
 mkdir -p "$BIN_DIR"
 backup "$BIN_DIR/headroom-watch"
@@ -146,6 +174,23 @@ if [ -d "$REPO_DIR/claude/hooks" ]; then
     install -m 0755 "$h" "$CLAUDE_DIR/hooks/$(basename "$h")"
     ok "hook $(basename "$h") -> $CLAUDE_DIR/hooks/"
   done
+fi
+
+# ---------------------------------------------------------------------------
+step "Register graphify skill (Claude Code)"
+# Deploys ~/.claude/skills/graphify/ (the skill files can't be vendored). Runs AFTER
+# the settings/CLAUDE.md deploy above so graphify's own trigger note lands in the
+# freshly written CLAUDE.md (and is reset to a single copy on every run). The always-on
+# HOOK + usage guidance ship in the repo templates (claude/settings.json,
+# claude/CLAUDE.md), so we do NOT run 'graphify claude install' — it is project-scoped
+# and would double-fire against the global hook.
+if command -v graphify >/dev/null 2>&1; then
+  backup "$CLAUDE_DIR/CLAUDE.md"
+  graphify install --platform claude >/dev/null 2>&1 && ok "graphify skill registered" \
+    || warn "graphify install failed"
+  info "build a repo's graph with '/graphify .' (extraction routes via headroom)"
+else
+  warn "graphify not installed — skipping skill registration"
 fi
 
 # ---------------------------------------------------------------------------

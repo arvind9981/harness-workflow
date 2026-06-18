@@ -35,6 +35,13 @@ claude          # auto-installs plugins from settings.json; log in when prompted
   Installed as a `uv` tool (`mempalace`, with the native `mempalace-mcp` server),
   loaded as a Claude Code plugin, plus a daily junk-drawer prune
   (`tools/mempalace/mempalace-prune.py` via systemd timer / launchd plist).
+- **graphify** (code knowledge graph) — turns a repo into a queryable graph and
+  redirects Claude's search (Glob/Grep) to the graph when one exists. Installed as
+  a `uv` tool (`graphifyy`, CLI `graphify`); the skill is registered globally and a
+  self-guarding `PreToolUse` hook ships in `claude/settings.json` (a no-op in repos
+  with no graph). Build a repo's graph on demand with `/graphify`; extraction routes
+  through the headroom proxy. Artifacts land in `graphify-out/` (globally git-ignored).
+  Graph **queries are local and LLM-free** — only building a graph uses tokens.
 
 ## Memory layer — mempalace
 
@@ -65,6 +72,21 @@ entity-refinement is optional (`--llm-model gemma4:e4b` via Ollama, or
 in `convos` mode — which ignores `.gitignore` and has no exclude flag — so it
 re-ingests tool-result / subagent noise that can only be removed *after* ingest.
 The daily prune (03:47 local) strips it so it doesn't pollute recall.
+
+## Code knowledge graph — graphify
+
+Global install is handled by `init.sh`; graphs are **per-repo and on demand**:
+
+```bash
+/graphify .            # build/refresh this repo's graph (in Claude Code)
+graphify update .      # incremental AST-only refresh after edits (no LLM)
+graphify query "..."   # local, LLM-free traversal of the graph
+```
+
+Building extracts semantic edges via Claude subagents through the headroom proxy
+(`ANTHROPIC_BASE_URL=127.0.0.1:8787`) — no extra config or local model needed.
+The `PreToolUse` hook only nudges Claude toward the graph once `graphify-out/graph.json`
+exists, so it's inert until you build one. `graphify-out/` is globally git-ignored.
 
 ## What it deliberately does NOT do
 
