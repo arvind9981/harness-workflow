@@ -18,19 +18,11 @@ CLAUDE_DIR="$HOME/.claude"
 BIN_DIR="$HOME/.local/bin"
 UNIT_DIR="$HOME/.config/systemd/user"      # systemd user units (Linux)
 LAUNCH_DIR="$HOME/Library/LaunchAgents"    # launchd LaunchAgents (macOS)
-LITELLM_DIR="$HOME/.config/litellm"
-MEM_DIR="$HOME/.claude-mem"
 
-# OS-derived hint strings shown to the user (the service manager differs per OS).
+# OS-derived hint string shown to the user (the service manager differs per OS).
 case "$OS" in
-  Darwin)
-    STATUS_HR="launchctl list | grep headroom-proxy"
-    STATUS_LL="launchctl list | grep litellm-qwen"
-    RESTART_LL="launchctl kickstart -k gui/$(id -u)/com.user.litellm-qwen" ;;
-  *)
-    STATUS_HR="systemctl --user status headroom-proxy"
-    STATUS_LL="systemctl --user status litellm-qwen"
-    RESTART_LL="systemctl --user restart litellm-qwen" ;;
+  Darwin) STATUS_HR="launchctl list | grep headroom-proxy" ;;
+  *)      STATUS_HR="systemctl --user status headroom-proxy" ;;
 esac
 
 c_grn=$'\033[32m'; c_yel=$'\033[33m'; c_red=$'\033[31m'; c_dim=$'\033[2m'; c_rst=$'\033[0m'
@@ -43,22 +35,6 @@ step() { printf '\n%s== %s ==%s\n' "$c_grn" "$1" "$c_rst"; }
 backup() {  # backup <path> — copy aside if it exists and differs from what we'll write
   [ -e "$1" ] && cp -p "$1" "$1.bak-init-$STAMP" && info "backed up $(basename "$1") -> $(basename "$1").bak-init-$STAMP"
   return 0
-}
-
-sed_inplace() {  # sed_inplace <expr> <file> — portable in-place edit (GNU vs BSD/macOS sed)
-  if [ "$OS" = "Darwin" ]; then sed -i '' "$1" "$2"; else sed -i "$1" "$2"; fi
-}
-
-upsert_env() {  # upsert_env <file> <KEY> <VALUE> — set KEY=VALUE, replacing or appending; other lines untouched
-  local f="$1" k="$2" v="$3"
-  touch "$f"
-  # ensure file ends with a newline before we append
-  [ -s "$f" ] && [ "$(tail -c1 "$f" | wc -l)" -eq 0 ] && printf '\n' >> "$f"
-  if grep -qE "^${k}=" "$f"; then
-    sed_inplace "s#^${k}=.*#${k}=${v}#" "$f"
-  else
-    printf '%s=%s\n' "$k" "$v" >> "$f"
-  fi
 }
 
 svc_enable() {  # svc_enable <linux_unit_file> <mac_plist_file> — install + start a background service
@@ -123,6 +99,17 @@ uv tool install --upgrade 'headroom-ai[proxy]' >/dev/null 2>&1 && ok "headroom-a
   || die "uv tool install 'headroom-ai[proxy]' failed"
 
 # ---------------------------------------------------------------------------
+step "Install mempalace (memory layer)"
+# mempalace is the memory layer (local-first, verbatim recall, zero-API retrieval).
+# The plugin auto-loads via settings.json; the CLI + native MCP server must be on
+# PATH for the plugin's MCP (.mcp.json calls `mempalace-mcp`) and its Stop/PreCompact
+# hooks (which call `mempalace`).
+uv tool install --upgrade mempalace >/dev/null 2>&1 && ok "mempalace installed/upgraded" \
+  || die "uv tool install mempalace failed"
+command -v mempalace-mcp >/dev/null 2>&1 && ok "mempalace-mcp (native MCP) present" \
+  || warn "mempalace-mcp missing — MCP wiring will fail"
+
+# ---------------------------------------------------------------------------
 step "Install scripts"
 mkdir -p "$BIN_DIR"
 backup "$BIN_DIR/headroom-watch"
@@ -147,6 +134,16 @@ if [ -f "$REPO_DIR/claude/CLAUDE.md" ]; then
   cp "$REPO_DIR/claude/CLAUDE.md" "$CLAUDE_DIR/CLAUDE.md"
   ok "CLAUDE.md (global standing instructions)"
 fi
+# hooks: deploy any repo hook scripts (e.g. mempalace recall) referenced by settings.json
+if [ -d "$REPO_DIR/claude/hooks" ]; then
+  mkdir -p "$CLAUDE_DIR/hooks"
+  for h in "$REPO_DIR"/claude/hooks/*.sh; do
+    [ -e "$h" ] || continue
+    backup "$CLAUDE_DIR/hooks/$(basename "$h")"
+    install -m 0755 "$h" "$CLAUDE_DIR/hooks/$(basename "$h")"
+    ok "hook $(basename "$h") -> $CLAUDE_DIR/hooks/"
+  done
+fi
 
 # ---------------------------------------------------------------------------
 step "Headroom proxy service"
@@ -158,44 +155,18 @@ else
 fi
 
 # ---------------------------------------------------------------------------
-step "Install litellm (local-model gateway)"
-uv tool install --upgrade 'litellm[proxy]' >/dev/null 2>&1 && ok "litellm[proxy] installed/upgraded" \
-  || die "uv tool install 'litellm[proxy]' failed"
-# proxy config (loopback-only, no secrets — no __HOME__ rendering needed)
-mkdir -p "$LITELLM_DIR"
-backup "$LITELLM_DIR/qwen-proxy.yaml"
-cp "$REPO_DIR/tools/litellm/qwen-proxy.yaml" "$LITELLM_DIR/qwen-proxy.yaml"
-ok "qwen-proxy.yaml -> $LITELLM_DIR/qwen-proxy.yaml"
-
-# prerequisite: Ollama + the qwen3.6 model (heavyweight, not auto-installed)
-if command -v ollama >/dev/null 2>&1; then
-  if ollama list 2>/dev/null | grep -q 'qwen3.6'; then
-    ok "ollama + qwen3.6 model present"
-  else
-    warn "ollama present but qwen3.6 missing — run: ollama pull qwen3.6:latest  (~23 GB)"
-  fi
+step "Seed mempalace (memory) — one-time setup"
+# Retrieval is fully local/zero-API. The embedding model downloads lazily on the
+# first embedding op (init/mine/search). The palace + per-project wings are a
+# one-time, network/disk-heavy step, so we guide rather than auto-run on every init.
+if [ -d "$HOME/.mempalace/palace" ]; then
+  ok "mempalace palace already present at ~/.mempalace/palace"
 else
-  warn "ollama not installed — install it, then 'ollama pull qwen3.6:latest' (~23 GB) to enable local-model routing"
-fi
-
-# ---------------------------------------------------------------------------
-step "litellm proxy service"
-if { [ "$OS" = "Darwin" ] && command -v launchctl >/dev/null 2>&1; } || command -v systemctl >/dev/null 2>&1; then
-  svc_enable "$REPO_DIR/tools/litellm/litellm-qwen.service" "$REPO_DIR/tools/litellm/com.user.litellm-qwen.plist"
-else
-  warn "skipped (no service manager). Run manually: litellm --config $LITELLM_DIR/qwen-proxy.yaml --port 4000 --host 127.0.0.1"
-fi
-
-# ---------------------------------------------------------------------------
-step "Wire claude-mem to local gateway"
-if [ -d "$MEM_DIR" ]; then
-  backup "$MEM_DIR/.env"
-  upsert_env "$MEM_DIR/.env" ANTHROPIC_BASE_URL "http://127.0.0.1:4000"
-  upsert_env "$MEM_DIR/.env" CLAUDE_MEM_PROVIDER "claude"
-  upsert_env "$MEM_DIR/.env" CLAUDE_MEM_CLAUDE_AUTH_METHOD "gateway"
-  ok "claude-mem .env wired to local gateway (existing keys/secrets untouched)"
-else
-  info "claude-mem not installed yet — skipping .env wiring (re-run init.sh after first 'claude' launch)"
+  info "first-time setup (one-time, ~300MB model + indexing):"
+  info "  mempalace init \"\$HOME\"                                  # create the global palace"
+  info "  mempalace mine ~/.claude/projects/ --mode convos       # seed memory from transcripts"
+  info "  recall is zero-API (local embeddings). LLM entity-refinement is optional:"
+  info "  default --llm-model gemma4:e4b via Ollama, or --no-llm for heuristics only."
 fi
 
 # ---------------------------------------------------------------------------
@@ -207,11 +178,6 @@ if curl -fsS --max-time 5 http://127.0.0.1:8787/health >/dev/null 2>&1; then
 else
   warn "headroom proxy not answering yet — check: $STATUS_HR"
 fi
-if curl -fsS --max-time 4 http://127.0.0.1:4000/health/readiness >/dev/null 2>&1; then
-  ok "litellm gateway healthy at http://127.0.0.1:4000"
-else
-  warn "litellm gateway not ready yet — needs ollama + qwen3.6; check: $STATUS_LL"
-fi
 
 cat <<EOF
 
@@ -219,6 +185,6 @@ ${c_grn}Done.${c_rst} Next:
   1) Start Claude Code:  ${c_dim}claude${c_rst}   (it auto-installs the plugins in settings.json)
   2) Log in when prompted (no tokens were copied by this repo).
   3) Optional: ${c_dim}headroom-watch${c_rst} to monitor token compression.
-  4) For local-model claude-mem: install Ollama + ${c_dim}ollama pull qwen3.6:latest${c_rst} (~23 GB),
-     then ${c_dim}${RESTART_LL}${c_rst}.
+  4) Seed memory (one-time): ${c_dim}mempalace init "\$HOME"${c_rst} then
+     ${c_dim}mempalace mine ~/.claude/projects/ --mode convos${c_rst}.
 EOF

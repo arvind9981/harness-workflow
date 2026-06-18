@@ -26,6 +26,18 @@
           }
         ]
       }
+    ],
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "__HOME__/.claude/hooks/mempalace-recall.sh",
+            "timeout": 12,
+            "statusMessage": "Recalling memory (mempalace)…"
+          }
+        ]
+      }
     ]
   },
   "enabledPlugins": {
@@ -33,8 +45,8 @@
     "frontend-design@claude-plugins-official": true,
     "superpowers@claude-plugins-official": true,
     "github@claude-plugins-official": true,
-    "claude-mem@thedotmack": true,
-    "headroom@headroom-marketplace": true
+    "headroom@headroom-marketplace": true,
+    "mempalace@mempalace": true
   },
   "extraKnownMarketplaces": {
     "karpathy-skills": {
@@ -43,16 +55,16 @@
         "repo": "forrestchang/andrej-karpathy-skills"
       }
     },
-    "thedotmack": {
-      "source": {
-        "source": "github",
-        "repo": "thedotmack/claude-mem"
-      }
-    },
     "headroom-marketplace": {
       "source": {
         "source": "github",
         "repo": "chopratejas/headroom"
+      }
+    },
+    "mempalace": {
+      "source": {
+        "source": "github",
+        "repo": "MemPalace/mempalace"
       }
     }
   },

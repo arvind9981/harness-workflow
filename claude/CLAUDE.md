@@ -29,3 +29,17 @@ requests in the moment take precedence over anything here.
   commits.
 - Don't upload or transmit my code, files, or data to external/third-party
   services without asking. (Web research is fine.)
+
+## Memory & tooling defaults
+The local stack (mempalace for memory, headroom for the proxy) is installed to be
+used — reach for the right tool without being asked:
+- **Recall before re-deriving.** Before non-trivial work, or whenever I reference
+  past work ("did we…", "how did we…", "the X fix", "last time"), search memory
+  (`mempalace search`, `mempalace wake-up`, or the mempalace MCP tools —
+  search / traverse / kg_query) instead of reconstructing from scratch.
+- A `UserPromptSubmit` hook surfaces relevant verbatim drawers each turn. When
+  those hits are relevant, use them — but verify they still hold before relying on
+  them; they reflect what was true when captured.
+- Memory captures automatically (mempalace `Stop`/`PreCompact` hooks). Still file
+  durable, non-obvious findings deliberately when they matter — don't wait to be
+  told.
