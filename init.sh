@@ -18,19 +18,11 @@ CLAUDE_DIR="$HOME/.claude"
 BIN_DIR="$HOME/.local/bin"
 UNIT_DIR="$HOME/.config/systemd/user"      # systemd user units (Linux)
 LAUNCH_DIR="$HOME/Library/LaunchAgents"    # launchd LaunchAgents (macOS)
-LITELLM_DIR="$HOME/.config/litellm"
-MEM_DIR="$HOME/.claude-mem"
 
-# OS-derived hint strings shown to the user (the service manager differs per OS).
+# OS-derived hint string shown to the user (the service manager differs per OS).
 case "$OS" in
-  Darwin)
-    STATUS_HR="launchctl list | grep headroom-proxy"
-    STATUS_LL="launchctl list | grep litellm-qwen"
-    RESTART_LL="launchctl kickstart -k gui/$(id -u)/com.user.litellm-qwen" ;;
-  *)
-    STATUS_HR="systemctl --user status headroom-proxy"
-    STATUS_LL="systemctl --user status litellm-qwen"
-    RESTART_LL="systemctl --user restart litellm-qwen" ;;
+  Darwin) STATUS_HR="launchctl list | grep headroom-proxy" ;;
+  *)      STATUS_HR="systemctl --user status headroom-proxy" ;;
 esac
 
 c_grn=$'\033[32m'; c_yel=$'\033[33m'; c_red=$'\033[31m'; c_dim=$'\033[2m'; c_rst=$'\033[0m'
@@ -43,22 +35,6 @@ step() { printf '\n%s== %s ==%s\n' "$c_grn" "$1" "$c_rst"; }
 backup() {  # backup <path> — copy aside if it exists and differs from what we'll write
   [ -e "$1" ] && cp -p "$1" "$1.bak-init-$STAMP" && info "backed up $(basename "$1") -> $(basename "$1").bak-init-$STAMP"
   return 0
-}
-
-sed_inplace() {  # sed_inplace <expr> <file> — portable in-place edit (GNU vs BSD/macOS sed)
-  if [ "$OS" = "Darwin" ]; then sed -i '' "$1" "$2"; else sed -i "$1" "$2"; fi
-}
-
-upsert_env() {  # upsert_env <file> <KEY> <VALUE> — set KEY=VALUE, replacing or appending; other lines untouched
-  local f="$1" k="$2" v="$3"
-  touch "$f"
-  # ensure file ends with a newline before we append
-  [ -s "$f" ] && [ "$(tail -c1 "$f" | wc -l)" -eq 0 ] && printf '\n' >> "$f"
-  if grep -qE "^${k}=" "$f"; then
-    sed_inplace "s#^${k}=.*#${k}=${v}#" "$f"
-  else
-    printf '%s=%s\n' "$k" "$v" >> "$f"
-  fi
 }
 
 svc_enable() {  # svc_enable <linux_unit_file> <mac_plist_file> — install + start a background service
@@ -123,11 +99,53 @@ uv tool install --upgrade 'headroom-ai[proxy]' >/dev/null 2>&1 && ok "headroom-a
   || die "uv tool install 'headroom-ai[proxy]' failed"
 
 # ---------------------------------------------------------------------------
+step "Install mempalace (memory layer)"
+# mempalace is the memory layer (local-first, verbatim recall, zero-API retrieval).
+# The plugin auto-loads via settings.json; the CLI + native MCP server must be on
+# PATH for the plugin's MCP (.mcp.json calls `mempalace-mcp`) and its Stop/PreCompact
+# hooks (which call `mempalace`).
+uv tool install --upgrade mempalace >/dev/null 2>&1 && ok "mempalace installed/upgraded" \
+  || die "uv tool install mempalace failed"
+command -v mempalace-mcp >/dev/null 2>&1 && ok "mempalace-mcp (native MCP) present" \
+  || warn "mempalace-mcp missing — MCP wiring will fail"
+
+# ---------------------------------------------------------------------------
+step "Install graphify (code knowledge graph)"
+# graphify turns a repo into a queryable graph; a self-guarding PreToolUse hook
+# (shipped in claude/settings.json) redirects search to the graph when one exists.
+# PyPI package is 'graphifyy' (double-y); the CLI is 'graphify'. Builds extract via
+# Claude subagents through the headroom proxy (no ollama, nothing to pin).
+uv tool install --upgrade graphifyy >/dev/null 2>&1 && ok "graphifyy installed/upgraded" \
+  || die "uv tool install graphifyy failed"
+command -v graphify >/dev/null 2>&1 && ok "graphify CLI present" \
+  || warn "graphify missing — skill registration will be skipped"
+
+# ---------------------------------------------------------------------------
+step "Ignore graphify artifacts globally"
+# graphify writes a per-repo graphify-out/ (graph.json, report, html, cache). Ignore
+# it globally so it never gets committed in any repo.
+GI="${XDG_CONFIG_HOME:-$HOME/.config}/git/ignore"
+mkdir -p "$(dirname "$GI")"
+if ! { [ -f "$GI" ] && grep -qxF 'graphify-out/' "$GI"; }; then
+  backup "$GI"
+  printf 'graphify-out/\n' >> "$GI"
+  ok "graphify-out/ added to $GI"
+else
+  ok "graphify-out/ already ignored in $GI"
+fi
+if [ -z "$(git config --global core.excludesFile 2>/dev/null)" ]; then
+  git config --global core.excludesFile "$GI" && info "set core.excludesFile=$GI"
+fi
+
+# ---------------------------------------------------------------------------
 step "Install scripts"
 mkdir -p "$BIN_DIR"
 backup "$BIN_DIR/headroom-watch"
 install -m 0755 "$REPO_DIR/tools/headroom/headroom-watch" "$BIN_DIR/headroom-watch"
 ok "headroom-watch -> $BIN_DIR/headroom-watch"
+backup "$BIN_DIR/mempalace-prune.py"
+install -m 0755 "$REPO_DIR/tools/mempalace/mempalace-prune.py" "$BIN_DIR/mempalace-prune.py"
+ok "mempalace-prune.py -> $BIN_DIR/mempalace-prune.py"
 case ":$PATH:" in *":$BIN_DIR:"*) : ;; *) warn "$BIN_DIR is not on your PATH — add it to use the headroom CLI" ;; esac
 
 # ---------------------------------------------------------------------------
@@ -147,6 +165,33 @@ if [ -f "$REPO_DIR/claude/CLAUDE.md" ]; then
   cp "$REPO_DIR/claude/CLAUDE.md" "$CLAUDE_DIR/CLAUDE.md"
   ok "CLAUDE.md (global standing instructions)"
 fi
+# hooks: deploy any repo hook scripts (e.g. mempalace recall) referenced by settings.json
+if [ -d "$REPO_DIR/claude/hooks" ]; then
+  mkdir -p "$CLAUDE_DIR/hooks"
+  for h in "$REPO_DIR"/claude/hooks/*.sh; do
+    [ -e "$h" ] || continue
+    backup "$CLAUDE_DIR/hooks/$(basename "$h")"
+    install -m 0755 "$h" "$CLAUDE_DIR/hooks/$(basename "$h")"
+    ok "hook $(basename "$h") -> $CLAUDE_DIR/hooks/"
+  done
+fi
+
+# ---------------------------------------------------------------------------
+step "Register graphify skill (Claude Code)"
+# Deploys ~/.claude/skills/graphify/ (the skill files can't be vendored). Runs AFTER
+# the settings/CLAUDE.md deploy above so graphify's own trigger note lands in the
+# freshly written CLAUDE.md (and is reset to a single copy on every run). The always-on
+# HOOK + usage guidance ship in the repo templates (claude/settings.json,
+# claude/CLAUDE.md), so we do NOT run 'graphify claude install' — it is project-scoped
+# and would double-fire against the global hook.
+if command -v graphify >/dev/null 2>&1; then
+  backup "$CLAUDE_DIR/CLAUDE.md"
+  graphify install --platform claude >/dev/null 2>&1 && ok "graphify skill registered" \
+    || warn "graphify install failed"
+  info "build a repo's graph with '/graphify .' (extraction routes via headroom)"
+else
+  warn "graphify not installed — skipping skill registration"
+fi
 
 # ---------------------------------------------------------------------------
 step "Headroom proxy service"
@@ -158,44 +203,46 @@ else
 fi
 
 # ---------------------------------------------------------------------------
-step "Install litellm (local-model gateway)"
-uv tool install --upgrade 'litellm[proxy]' >/dev/null 2>&1 && ok "litellm[proxy] installed/upgraded" \
-  || die "uv tool install 'litellm[proxy]' failed"
-# proxy config (loopback-only, no secrets — no __HOME__ rendering needed)
-mkdir -p "$LITELLM_DIR"
-backup "$LITELLM_DIR/qwen-proxy.yaml"
-cp "$REPO_DIR/tools/litellm/qwen-proxy.yaml" "$LITELLM_DIR/qwen-proxy.yaml"
-ok "qwen-proxy.yaml -> $LITELLM_DIR/qwen-proxy.yaml"
-
-# prerequisite: Ollama + the qwen3.6 model (heavyweight, not auto-installed)
-if command -v ollama >/dev/null 2>&1; then
-  if ollama list 2>/dev/null | grep -q 'qwen3.6'; then
-    ok "ollama + qwen3.6 model present"
-  else
-    warn "ollama present but qwen3.6 missing — run: ollama pull qwen3.6:latest  (~23 GB)"
-  fi
+step "Seed mempalace (memory) — one-time setup"
+# Retrieval is fully local/zero-API. The embedding model downloads lazily on the
+# first embedding op (init/mine/search). The palace + per-project wings are a
+# one-time, network/disk-heavy step, so we guide rather than auto-run on every init.
+if [ -d "$HOME/.mempalace/palace" ]; then
+  ok "mempalace palace already present at ~/.mempalace/palace"
 else
-  warn "ollama not installed — install it, then 'ollama pull qwen3.6:latest' (~23 GB) to enable local-model routing"
+  info "first-time setup (one-time, ~300MB model + indexing):"
+  info "  mempalace init \"\$HOME\"                                  # create the global palace"
+  info "  mempalace mine ~/.claude/projects/ --mode convos       # seed memory from transcripts"
+  info "  recall is zero-API (local embeddings). LLM entity-refinement is optional:"
+  info "  default --llm-model gemma4:e4b via Ollama, or --no-llm for heuristics only."
 fi
 
 # ---------------------------------------------------------------------------
-step "litellm proxy service"
-if { [ "$OS" = "Darwin" ] && command -v launchctl >/dev/null 2>&1; } || command -v systemctl >/dev/null 2>&1; then
-  svc_enable "$REPO_DIR/tools/litellm/litellm-qwen.service" "$REPO_DIR/tools/litellm/com.user.litellm-qwen.plist"
+step "mempalace prune scheduler (daily)"
+# The Stop hook mines the whole session dir in convos mode (which ignores .gitignore
+# and has no exclude), so it re-ingests tool-result/subagent noise that can only be
+# removed after ingest. A daily job prunes it (see tools/mempalace/mempalace-prune.py).
+mkdir -p "$HOME/.mempalace/logs"
+if [ "$OS" = "Darwin" ] && command -v launchctl >/dev/null 2>&1; then
+  dest="$LAUNCH_DIR/com.user.mempalace-prune.plist"
+  mkdir -p "$LAUNCH_DIR"
+  backup "$dest"
+  sed "s#__HOME__#$HOME#g" "$REPO_DIR/tools/mempalace/com.user.mempalace-prune.plist" > "$dest"
+  launchctl unload "$dest" >/dev/null 2>&1 || true
+  launchctl load -w "$dest" && ok "daily prune scheduled (launchd, 03:47)" \
+    || warn "could not load prune plist"
+elif command -v systemctl >/dev/null 2>&1; then
+  mkdir -p "$UNIT_DIR"
+  for u in mempalace-prune.service mempalace-prune.timer; do
+    backup "$UNIT_DIR/$u"
+    cp "$REPO_DIR/tools/mempalace/$u" "$UNIT_DIR/$u"
+  done
+  systemctl --user daemon-reload
+  systemctl --user enable --now mempalace-prune.timer \
+    && ok "daily prune scheduled (systemd timer, 03:47)" \
+    || warn "could not enable mempalace-prune.timer"
 else
-  warn "skipped (no service manager). Run manually: litellm --config $LITELLM_DIR/qwen-proxy.yaml --port 4000 --host 127.0.0.1"
-fi
-
-# ---------------------------------------------------------------------------
-step "Wire claude-mem to local gateway"
-if [ -d "$MEM_DIR" ]; then
-  backup "$MEM_DIR/.env"
-  upsert_env "$MEM_DIR/.env" ANTHROPIC_BASE_URL "http://127.0.0.1:4000"
-  upsert_env "$MEM_DIR/.env" CLAUDE_MEM_PROVIDER "claude"
-  upsert_env "$MEM_DIR/.env" CLAUDE_MEM_CLAUDE_AUTH_METHOD "gateway"
-  ok "claude-mem .env wired to local gateway (existing keys/secrets untouched)"
-else
-  info "claude-mem not installed yet — skipping .env wiring (re-run init.sh after first 'claude' launch)"
+  warn "skipped (no scheduler). Run daily: mempalace's python on $BIN_DIR/mempalace-prune.py"
 fi
 
 # ---------------------------------------------------------------------------
@@ -207,11 +254,6 @@ if curl -fsS --max-time 5 http://127.0.0.1:8787/health >/dev/null 2>&1; then
 else
   warn "headroom proxy not answering yet — check: $STATUS_HR"
 fi
-if curl -fsS --max-time 4 http://127.0.0.1:4000/health/readiness >/dev/null 2>&1; then
-  ok "litellm gateway healthy at http://127.0.0.1:4000"
-else
-  warn "litellm gateway not ready yet — needs ollama + qwen3.6; check: $STATUS_LL"
-fi
 
 cat <<EOF
 
@@ -219,6 +261,6 @@ ${c_grn}Done.${c_rst} Next:
   1) Start Claude Code:  ${c_dim}claude${c_rst}   (it auto-installs the plugins in settings.json)
   2) Log in when prompted (no tokens were copied by this repo).
   3) Optional: ${c_dim}headroom-watch${c_rst} to monitor token compression.
-  4) For local-model claude-mem: install Ollama + ${c_dim}ollama pull qwen3.6:latest${c_rst} (~23 GB),
-     then ${c_dim}${RESTART_LL}${c_rst}.
+  4) Seed memory (one-time): ${c_dim}mempalace init "\$HOME"${c_rst} then
+     ${c_dim}mempalace mine ~/.claude/projects/ --mode convos${c_rst}.
 EOF

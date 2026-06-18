@@ -1,0 +1,27 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- macOS launchd equivalent of mempalace-prune.timer + .service.
+     Runs the daily junk-drawer prune. __HOME__ is rendered to $HOME by init.sh. -->
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.user.mempalace-prune</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>__HOME__/.local/share/uv/tools/mempalace/bin/python</string>
+    <string>__HOME__/.local/bin/mempalace-prune.py</string>
+  </array>
+  <!-- No Weekday key => fires daily at the given Hour/Minute. -->
+  <key>StartCalendarInterval</key>
+  <dict>
+    <key>Hour</key><integer>3</integer>
+    <key>Minute</key><integer>47</integer>
+  </dict>
+  <key>StandardOutPath</key>
+  <string>__HOME__/.mempalace/logs/prune.log</string>
+  <key>StandardErrorPath</key>
+  <string>__HOME__/.mempalace/logs/prune.log</string>
+  <key>Nice</key>
+  <integer>10</integer>
+</dict>
+</plist>

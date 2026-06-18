@@ -13,3 +13,11 @@
 # OS / editor noise
 .DS_Store
 *.swp
+
+# MemPalace per-project files (issue #185)
+mempalace.yaml
+entities.json
+
+# MemPalace local memory store (machine-local; lives in $HOME, ignored defensively)
+/.mempalace/
+mempalace-data/

@@ -29,3 +29,27 @@ requests in the moment take precedence over anything here.
   commits.
 - Don't upload or transmit my code, files, or data to external/third-party
   services without asking. (Web research is fine.)
+
+## Memory & tooling defaults
+The local stack (mempalace for memory, headroom for the proxy) is installed to be
+used — reach for the right tool without being asked:
+- **Recall before re-deriving.** Before non-trivial work, or whenever I reference
+  past work ("did we…", "how did we…", "the X fix", "last time"), search memory
+  (`mempalace search`, `mempalace wake-up`, or the mempalace MCP tools —
+  search / traverse / kg_query) instead of reconstructing from scratch.
+- A `UserPromptSubmit` hook surfaces relevant verbatim drawers each turn. When
+  those hits are relevant, use them — but verify they still hold before relying on
+  them; they reflect what was true when captured.
+- Memory captures automatically (mempalace `Stop`/`PreCompact` hooks). Still file
+  durable, non-obvious findings deliberately when they matter — don't wait to be
+  told.
+
+## graphify
+
+This project has a knowledge graph at graphify-out/ with god nodes, community structure, and cross-file relationships.
+
+Rules:
+- For codebase questions, first run `graphify query "<question>"` when graphify-out/graph.json exists. Use `graphify path "<A>" "<B>"` for relationships and `graphify explain "<concept>"` for focused concepts. These return a scoped subgraph, usually much smaller than GRAPH_REPORT.md or raw grep output.
+- If graphify-out/wiki/index.md exists, use it for broad navigation instead of raw source browsing.
+- Read graphify-out/GRAPH_REPORT.md only for broad architecture review or when query/path/explain do not surface enough context.
+- After modifying code, run `graphify update .` to keep the graph current (AST-only, no API cost).
