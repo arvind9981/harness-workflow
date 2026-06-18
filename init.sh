@@ -115,6 +115,9 @@ mkdir -p "$BIN_DIR"
 backup "$BIN_DIR/headroom-watch"
 install -m 0755 "$REPO_DIR/tools/headroom/headroom-watch" "$BIN_DIR/headroom-watch"
 ok "headroom-watch -> $BIN_DIR/headroom-watch"
+backup "$BIN_DIR/mempalace-prune.py"
+install -m 0755 "$REPO_DIR/tools/mempalace/mempalace-prune.py" "$BIN_DIR/mempalace-prune.py"
+ok "mempalace-prune.py -> $BIN_DIR/mempalace-prune.py"
 case ":$PATH:" in *":$BIN_DIR:"*) : ;; *) warn "$BIN_DIR is not on your PATH — add it to use the headroom CLI" ;; esac
 
 # ---------------------------------------------------------------------------
@@ -167,6 +170,33 @@ else
   info "  mempalace mine ~/.claude/projects/ --mode convos       # seed memory from transcripts"
   info "  recall is zero-API (local embeddings). LLM entity-refinement is optional:"
   info "  default --llm-model gemma4:e4b via Ollama, or --no-llm for heuristics only."
+fi
+
+# ---------------------------------------------------------------------------
+step "mempalace prune scheduler (weekly)"
+# The Stop hook mines the whole session dir, so it re-ingests tool-result/subagent
+# noise over time. A weekly job prunes it (see tools/mempalace/mempalace-prune.py).
+mkdir -p "$HOME/.mempalace/logs"
+if [ "$OS" = "Darwin" ] && command -v launchctl >/dev/null 2>&1; then
+  dest="$LAUNCH_DIR/com.user.mempalace-prune.plist"
+  mkdir -p "$LAUNCH_DIR"
+  backup "$dest"
+  sed "s#__HOME__#$HOME#g" "$REPO_DIR/tools/mempalace/com.user.mempalace-prune.plist" > "$dest"
+  launchctl unload "$dest" >/dev/null 2>&1 || true
+  launchctl load -w "$dest" && ok "weekly prune scheduled (launchd, Sun 03:47)" \
+    || warn "could not load prune plist"
+elif command -v systemctl >/dev/null 2>&1; then
+  mkdir -p "$UNIT_DIR"
+  for u in mempalace-prune.service mempalace-prune.timer; do
+    backup "$UNIT_DIR/$u"
+    cp "$REPO_DIR/tools/mempalace/$u" "$UNIT_DIR/$u"
+  done
+  systemctl --user daemon-reload
+  systemctl --user enable --now mempalace-prune.timer \
+    && ok "weekly prune scheduled (systemd timer, Sun 03:47)" \
+    || warn "could not enable mempalace-prune.timer"
+else
+  warn "skipped (no scheduler). Run weekly: mempalace's python on $BIN_DIR/mempalace-prune.py"
 fi
 
 # ---------------------------------------------------------------------------

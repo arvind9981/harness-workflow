@@ -1,0 +1,8 @@
+[Unit]
+Description=mempalace junk-drawer prune (tool-result/subagent/ANSI noise)
+Documentation=https://github.com/MemPalace/mempalace
+
+[Service]
+Type=oneshot
+ExecStart=%h/.local/share/uv/tools/mempalace/bin/python %h/.local/bin/mempalace-prune.py
+Nice=10

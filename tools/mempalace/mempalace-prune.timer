@@ -1,0 +1,10 @@
+[Unit]
+Description=Weekly mempalace junk-drawer prune
+
+[Timer]
+# Sunday 03:47 local; off the :00 mark. Persistent catches up if the box was off.
+OnCalendar=Sun *-*-* 03:47:00
+Persistent=true
+
+[Install]
+WantedBy=timers.target
