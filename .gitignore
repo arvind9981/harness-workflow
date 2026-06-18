@@ -13,3 +13,10 @@
 # OS / editor noise
 .DS_Store
 *.swp
+
+# Machine-local Claude runtime config (repo tracks the sanitized claude/ instead)
+/.claude/
+
+# Visual-plan / planning scratch
+/plans/
+/plan-blocks.md

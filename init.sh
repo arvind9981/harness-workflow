@@ -147,6 +147,17 @@ if [ -f "$REPO_DIR/claude/CLAUDE.md" ]; then
   cp "$REPO_DIR/claude/CLAUDE.md" "$CLAUDE_DIR/CLAUDE.md"
   ok "CLAUDE.md (global standing instructions)"
 fi
+# hooks: shell scripts referenced by settings.json (e.g. claude-mem recall on
+# UserPromptSubmit). Copied executable; harmless no-op when the local stack is absent.
+if [ -d "$REPO_DIR/claude/hooks" ]; then
+  mkdir -p "$CLAUDE_DIR/hooks"
+  for hook in "$REPO_DIR"/claude/hooks/*; do
+    [ -f "$hook" ] || continue
+    backup "$CLAUDE_DIR/hooks/$(basename "$hook")"
+    install -m 0755 "$hook" "$CLAUDE_DIR/hooks/$(basename "$hook")"
+    ok "hooks/$(basename "$hook")"
+  done
+fi
 
 # ---------------------------------------------------------------------------
 step "Headroom proxy service"

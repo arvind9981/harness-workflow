@@ -29,3 +29,17 @@ requests in the moment take precedence over anything here.
   commits.
 - Don't upload or transmit my code, files, or data to external/third-party
   services without asking. (Web research is fine.)
+
+## Memory & tooling defaults
+The local stack (claude-mem, headroom, LiteLLM-routed qwen) is installed to be
+used — reach for the right tool without being asked:
+- **Recall before re-deriving.** Before non-trivial work, or whenever I reference
+  past work ("did we…", "how did we…", "the X fix", "last time"), run mem-search
+  (search → timeline → get_observations) instead of reconstructing from scratch.
+- A `UserPromptSubmit` hook surfaces candidate observations each turn. When those
+  hits are relevant, fetch full detail with `get_observations([ids])` rather than
+  re-investigating — but verify they still hold before relying on them.
+- **Prefer the structural tools.** Use smart-explore (AST search) over reading
+  whole files to understand code structure; use claude-mem knowledge-agent for
+  synthesized answers across many observations.
+- Save durable, non-obvious findings to memory as you go — don't wait to be told.
