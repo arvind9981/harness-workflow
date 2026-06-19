@@ -43,6 +43,13 @@ used — reach for the right tool without being asked:
 - Memory captures automatically (mempalace `Stop`/`PreCompact` hooks). Still file
   durable, non-obvious findings deliberately when they matter — don't wait to be
   told.
+- **Graphify feeds memory by hand, not by pipe.** Don't bulk-mine `graphify-out/`
+  into mempalace — the graph is pinned to a commit, goes stale on the next code
+  change, and mempalace can't expire it, so stale structure would get injected as
+  fact every turn. Instead, when graphify surfaces a *durable* architecture truth,
+  hand-curate it into a memory drawer: read `GRAPH_REPORT.md` (god nodes / community
+  summaries), distill only the non-churning facts, and reconcile against current
+  truth before filing. Graphify is a seed for curation, not an auto-pipeline.
 
 ## graphify
 
