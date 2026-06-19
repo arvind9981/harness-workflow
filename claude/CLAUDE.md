@@ -42,9 +42,18 @@ used — reach for the right tool without being asked:
 - A `UserPromptSubmit` hook surfaces relevant verbatim drawers each turn. When
   those hits are relevant, use them — but verify they still hold before relying on
   them; they reflect what was true when captured.
-- Memory captures automatically (mempalace `Stop`/`PreCompact` hooks). Still file
-  durable, non-obvious findings deliberately when they matter — don't wait to be
-  told.
+- Memory captures automatically (mempalace `Stop`/`PreCompact` hooks) — so a
+  finding already lands in mempalace by default. **Don't reflexively write a
+  `.md` for every finding.**
+- **Two memory tiers — choose deliberately:**
+  - **File-based `memory/*.md` + `MEMORY.md`** loads into context *every* session,
+    so it costs context-window space always. Reserve it for the small curated
+    always-load set: recovery procedures (must survive mempalace being down),
+    hard preferences, and "north-star" facts.
+  - **mempalace** is the default home for everything else — auto-captured, semantic
+    recall on demand, no per-session context cost. For a durable finding worth
+    guaranteed searchability, file it into mempalace deliberately (`add_drawer`),
+    not into a `.md`.
 - **Session recap ("where you left off").** A `Stop` hook
   (`mempalace-recap-write.sh`) summarizes each session into a per-project recap
   via a local model (`gemma4:e4b`, on-device, `think:false`), and a SessionStart
