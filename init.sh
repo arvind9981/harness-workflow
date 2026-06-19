@@ -155,6 +155,9 @@ ok "mempalace-snapshot.sh -> $BIN_DIR/mempalace-snapshot.sh"
 backup "$BIN_DIR/mempalace-stop-timeout.sh"
 install -m 0755 "$REPO_DIR/tools/mempalace/mempalace-stop-timeout.sh" "$BIN_DIR/mempalace-stop-timeout.sh"
 ok "mempalace-stop-timeout.sh -> $BIN_DIR/mempalace-stop-timeout.sh"
+backup "$BIN_DIR/mempalace-stop-detach.sh"
+install -m 0755 "$REPO_DIR/tools/mempalace/mempalace-stop-detach.sh" "$BIN_DIR/mempalace-stop-detach.sh"
+ok "mempalace-stop-detach.sh -> $BIN_DIR/mempalace-stop-detach.sh"
 case ":$PATH:" in *":$BIN_DIR:"*) : ;; *) warn "$BIN_DIR is not on your PATH — add it to use the headroom CLI" ;; esac
 
 # ---------------------------------------------------------------------------
@@ -322,7 +325,10 @@ step "mempalace Stop-hook timeout (anti-corruption)"
 # not be installed yet on first run) and MUST be re-run after 'claude' login and
 # after every mempalace plugin update.
 "$BIN_DIR/mempalace-stop-timeout.sh" 2>&1 | sed 's/^/  /' || true
-info "re-run '$BIN_DIR/mempalace-stop-timeout.sh' after 'claude' login and after mempalace plugin updates"
+# Detach the Stop-hook ingest so turn-end never blocks on it (and the writer is
+# never SIGKILL'd mid-write). Same lifecycle: plugin (re)install reverts it.
+"$BIN_DIR/mempalace-stop-detach.sh" 2>&1 | sed 's/^/  /' || true
+info "re-run '$BIN_DIR/mempalace-stop-timeout.sh' and '$BIN_DIR/mempalace-stop-detach.sh' after 'claude' login and after mempalace plugin updates"
 
 # ---------------------------------------------------------------------------
 step "Verify"
