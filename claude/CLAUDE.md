@@ -45,6 +45,11 @@ used — reach for the right tool without being asked:
 - Memory captures automatically (mempalace `Stop`/`PreCompact` hooks). Still file
   durable, non-obvious findings deliberately when they matter — don't wait to be
   told.
+- **Session recap ("where you left off").** A `Stop` hook
+  (`mempalace-recap-write.sh`) summarizes each session into a per-project recap
+  via a local model (`gemma4:e4b`, on-device, `think:false`), and a SessionStart
+  hook (`mempalace-recap-show.sh`) shows it next time. Falls back to a cleaned
+  list of recent prompts if Ollama/the model is unavailable.
 - **Graphify auto-syncs into mempalace (nightly, wipe-and-replace).** A PostToolUse
   hook (`graphify-autoupdate.sh`) runs `graphify update .` on every code change to
   keep the graph fresh; a nightly timer (`graphify-reseed.sh`, 04:13) then wipes the
