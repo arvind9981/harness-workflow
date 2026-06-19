@@ -40,4 +40,10 @@ echo "snapshot ok: $tmp.gz ($(du -h "$tmp.gz" | cut -f1))"
 # Rotation: keep the newest $KEEP clean snapshots; never count SUSPECT toward
 # the keep set, and never auto-delete SUSPECT files (they need a human look).
 mapfile -t old < <(ls -1t "$DEST_DIR"/chroma-*.sqlite3.gz 2>/dev/null | tail -n +"$((KEEP+1))")
-for f in "${old[@]:-}"; do [ -n "$f" ] && rm -f "$f" && echo "rotated out: $f"; done
+if [ "${#old[@]}" -gt 0 ]; then
+  for f in "${old[@]}"; do
+    [ -n "$f" ] || continue
+    rm -f "$f" && echo "rotated out: $f"
+  done
+fi
+exit 0   # success regardless of whether rotation had anything to remove

@@ -5,6 +5,9 @@
 #   1. stale mine_palace lock (dead owner PID) -> removes it
 #   2. malformed FTS5 inverted index           -> FTS5 'rebuild'
 #   3. corrupt HNSW index (query DEADLOCKS)     -> repair --mode from-sqlite
+# Also takes a throttled (6h) snapshot of chroma.sqlite3 — the usage-driven
+# PRIMARY snapshot trigger, so snapshots don't depend on the machine being on at
+# any wall-clock time (the systemd timer is just a backstop for long sessions).
 # Throttled so it does the expensive query probe at most once per window.
 # Everything is best-effort; always exits 0.
 set -uo pipefail
@@ -54,8 +57,23 @@ if [ "$qc" != "ok" ]; then
   fi
 fi
 
-# ---- 3. throttled HNSW probe (expensive: loads embedder + queries) --------
 now="$(date +%s)"
+
+# ---- 3. usage-driven snapshot (throttled) ---------------------------------
+# Primary snapshot trigger: tied to actually using Claude, so it does not depend
+# on the machine being powered on at any wall-clock time (the systemd timer is
+# only a backstop for long-running sessions). The snapshot script self-guards
+# with quick_check, so it never overwrites a good snapshot with a corrupt one.
+SNAP="$HOME/.local/bin/mempalace-snapshot.sh"
+SNAP_THROTTLE="${MEMPALACE_SNAPSHOT_THROTTLE:-21600}"   # 6h
+snap_stamp="$STATE/last_snapshot"
+slast="$(cat "$snap_stamp" 2>/dev/null || echo 0)"; [[ "$slast" =~ ^[0-9]+$ ]] || slast=0
+if [ -x "$SNAP" ] && [ "$((now - slast))" -ge "$SNAP_THROTTLE" ]; then
+  echo "$now" > "$snap_stamp"
+  if "$SNAP" >>"$LOG" 2>&1; then log "usage-driven snapshot taken"; else log "snapshot attempt failed"; fi
+fi
+
+# ---- 4. throttled HNSW probe (expensive: loads embedder + queries) --------
 last="$(cat "$STAMP" 2>/dev/null || echo 0)"
 [[ "$last" =~ ^[0-9]+$ ]] || last=0
 if [ "$((now - last))" -lt "$THROTTLE" ]; then
