@@ -1,0 +1,28 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- macOS launchd equivalent of graphify-reseed.timer + .service.
+     Nightly graphify→mempalace structural reseed. __HOME__ and __REPO__ are
+     rendered to $HOME and the repo path by init.sh. -->
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.user.graphify-reseed</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>__HOME__/.local/bin/graphify-reseed.sh</string>
+    <string>__REPO__</string>
+  </array>
+  <!-- No Weekday key => fires daily at the given Hour/Minute. -->
+  <key>StartCalendarInterval</key>
+  <dict>
+    <key>Hour</key><integer>4</integer>
+    <key>Minute</key><integer>13</integer>
+  </dict>
+  <key>StandardOutPath</key>
+  <string>__HOME__/.mempalace/logs/graphify-reseed.log</string>
+  <key>StandardErrorPath</key>
+  <string>__HOME__/.mempalace/logs/graphify-reseed.log</string>
+  <key>Nice</key>
+  <integer>10</integer>
+</dict>
+</plist>

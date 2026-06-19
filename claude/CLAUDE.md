@@ -43,13 +43,16 @@ used — reach for the right tool without being asked:
 - Memory captures automatically (mempalace `Stop`/`PreCompact` hooks). Still file
   durable, non-obvious findings deliberately when they matter — don't wait to be
   told.
-- **Graphify feeds memory by hand, not by pipe.** Don't bulk-mine `graphify-out/`
-  into mempalace — the graph is pinned to a commit, goes stale on the next code
-  change, and mempalace can't expire it, so stale structure would get injected as
-  fact every turn. Instead, when graphify surfaces a *durable* architecture truth,
-  hand-curate it into a memory drawer: read `GRAPH_REPORT.md` (god nodes / community
-  summaries), distill only the non-churning facts, and reconcile against current
-  truth before filing. Graphify is a seed for curation, not an auto-pipeline.
+- **Graphify auto-syncs into mempalace (nightly, wipe-and-replace).** A PostToolUse
+  hook (`graphify-autoupdate.sh`) runs `graphify update .` on every code change to
+  keep the graph fresh; a nightly timer (`graphify-reseed.sh`, 04:13) then wipes the
+  `graphify_<repo>` wing and re-mines `GRAPH_REPORT.md` into it — so structural recall
+  always mirrors the current graph with no staleness and no manual curation. The
+  reseed runs **out of session**: a live Claude session holds the mempalace
+  write-lock, so an in-session `mempalace mine` deadlocks. The job self-skips when the
+  MCP server is up and retries next night — so **don't add an in-session mining
+  hook**. To force a refresh now, close Claude and run
+  `~/.local/bin/graphify-reseed.sh <repo>`.
 
 ## graphify
 

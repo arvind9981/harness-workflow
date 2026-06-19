@@ -146,6 +146,9 @@ ok "headroom-watch -> $BIN_DIR/headroom-watch"
 backup "$BIN_DIR/mempalace-prune.py"
 install -m 0755 "$REPO_DIR/tools/mempalace/mempalace-prune.py" "$BIN_DIR/mempalace-prune.py"
 ok "mempalace-prune.py -> $BIN_DIR/mempalace-prune.py"
+backup "$BIN_DIR/graphify-reseed.sh"
+install -m 0755 "$REPO_DIR/tools/graphify/graphify-reseed.sh" "$BIN_DIR/graphify-reseed.sh"
+ok "graphify-reseed.sh -> $BIN_DIR/graphify-reseed.sh"
 case ":$PATH:" in *":$BIN_DIR:"*) : ;; *) warn "$BIN_DIR is not on your PATH — add it to use the headroom CLI" ;; esac
 
 # ---------------------------------------------------------------------------
@@ -243,6 +246,37 @@ elif command -v systemctl >/dev/null 2>&1; then
     || warn "could not enable mempalace-prune.timer"
 else
   warn "skipped (no scheduler). Run daily: mempalace's python on $BIN_DIR/mempalace-prune.py"
+fi
+
+# ---------------------------------------------------------------------------
+step "graphify→mempalace reseed scheduler (nightly)"
+# Keeps mempalace's structural memory (wing graphify_<repo>) in sync with the code
+# graph by wipe-and-replace from graphify-out/GRAPH_REPORT.md. Runs OUT OF SESSION:
+# a live Claude session holds the mempalace write-lock, so an in-session mine would
+# deadlock — the job self-skips when the MCP server is up and retries next night.
+# See tools/graphify/graphify-reseed.sh.
+if [ "$OS" = "Darwin" ] && command -v launchctl >/dev/null 2>&1; then
+  dest="$LAUNCH_DIR/com.user.graphify-reseed.plist"
+  mkdir -p "$LAUNCH_DIR"
+  backup "$dest"
+  sed -e "s#__HOME__#$HOME#g" -e "s#__REPO__#$REPO_DIR#g" \
+    "$REPO_DIR/tools/graphify/com.user.graphify-reseed.plist" > "$dest"
+  launchctl unload "$dest" >/dev/null 2>&1 || true
+  launchctl load -w "$dest" && ok "nightly graphify reseed scheduled (launchd, 04:13)" \
+    || warn "could not load graphify-reseed plist"
+elif command -v systemctl >/dev/null 2>&1; then
+  mkdir -p "$UNIT_DIR"
+  backup "$UNIT_DIR/graphify-reseed.timer"
+  cp "$REPO_DIR/tools/graphify/graphify-reseed.timer" "$UNIT_DIR/graphify-reseed.timer"
+  backup "$UNIT_DIR/graphify-reseed.service"
+  sed "s#__REPO__#$REPO_DIR#g" \
+    "$REPO_DIR/tools/graphify/graphify-reseed.service" > "$UNIT_DIR/graphify-reseed.service"
+  systemctl --user daemon-reload
+  systemctl --user enable --now graphify-reseed.timer \
+    && ok "nightly graphify reseed scheduled (systemd timer, 04:13)" \
+    || warn "could not enable graphify-reseed.timer"
+else
+  warn "skipped (no scheduler). Run nightly: $BIN_DIR/graphify-reseed.sh $REPO_DIR"
 fi
 
 # ---------------------------------------------------------------------------
