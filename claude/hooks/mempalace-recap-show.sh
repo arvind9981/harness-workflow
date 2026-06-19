@@ -45,8 +45,13 @@ else:              when = f"{age // 86400}d ago"
 
 tag = "" if rec.get("model") and rec["model"] != "fallback" else "  (heuristic recap — local model was unavailable)"
 header = f"\U0001F4CD Continuing from your last session ({wing}, {when}){tag}\n\n"
+msg = header + recap
+# additionalContext -> Claude's context (so it can continue the work).
+# systemMessage     -> rendered visibly to the user (SessionStart stdout/
+#                      additionalContext is NOT shown to the user otherwise).
 out = {"hookSpecificOutput": {"hookEventName": "SessionStart",
-                              "additionalContext": header + recap}}
+                              "additionalContext": msg},
+       "systemMessage": msg}
 print(json.dumps(out))
 PY
 exit 0
