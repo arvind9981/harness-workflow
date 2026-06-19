@@ -149,6 +149,12 @@ ok "mempalace-prune.py -> $BIN_DIR/mempalace-prune.py"
 backup "$BIN_DIR/graphify-reseed.sh"
 install -m 0755 "$REPO_DIR/tools/graphify/graphify-reseed.sh" "$BIN_DIR/graphify-reseed.sh"
 ok "graphify-reseed.sh -> $BIN_DIR/graphify-reseed.sh"
+backup "$BIN_DIR/mempalace-snapshot.sh"
+install -m 0755 "$REPO_DIR/tools/mempalace/mempalace-snapshot.sh" "$BIN_DIR/mempalace-snapshot.sh"
+ok "mempalace-snapshot.sh -> $BIN_DIR/mempalace-snapshot.sh"
+backup "$BIN_DIR/mempalace-stop-timeout.sh"
+install -m 0755 "$REPO_DIR/tools/mempalace/mempalace-stop-timeout.sh" "$BIN_DIR/mempalace-stop-timeout.sh"
+ok "mempalace-stop-timeout.sh -> $BIN_DIR/mempalace-stop-timeout.sh"
 case ":$PATH:" in *":$BIN_DIR:"*) : ;; *) warn "$BIN_DIR is not on your PATH — add it to use the headroom CLI" ;; esac
 
 # ---------------------------------------------------------------------------
@@ -249,6 +255,35 @@ else
 fi
 
 # ---------------------------------------------------------------------------
+step "mempalace snapshot scheduler (every 6h)"
+# A crashed/SIGKILL'd writer can corrupt the derived HNSW + FTS5 indexes (ChromaDB
+# writes aren't crash-atomic). chroma.sqlite3 is the transactional source of truth,
+# so a periodic online .backup of it makes any such corruption fully rebuildable
+# (mempalace repair --mode from-sqlite). Pairs with the SessionStart self-heal hook.
+mkdir -p "$HOME/.mempalace/logs"
+if [ "$OS" = "Darwin" ] && command -v launchctl >/dev/null 2>&1; then
+  dest="$LAUNCH_DIR/com.user.mempalace-snapshot.plist"
+  mkdir -p "$LAUNCH_DIR"
+  backup "$dest"
+  sed "s#__HOME__#$HOME#g" "$REPO_DIR/tools/mempalace/com.user.mempalace-snapshot.plist" > "$dest"
+  launchctl unload "$dest" >/dev/null 2>&1 || true
+  launchctl load -w "$dest" && ok "6h snapshot scheduled (launchd)" \
+    || warn "could not load snapshot plist"
+elif command -v systemctl >/dev/null 2>&1; then
+  mkdir -p "$UNIT_DIR"
+  for u in mempalace-snapshot.service mempalace-snapshot.timer; do
+    backup "$UNIT_DIR/$u"
+    cp "$REPO_DIR/tools/mempalace/$u" "$UNIT_DIR/$u"
+  done
+  systemctl --user daemon-reload
+  systemctl --user enable --now mempalace-snapshot.timer \
+    && ok "6h snapshot scheduled (systemd timer)" \
+    || warn "could not enable mempalace-snapshot.timer"
+else
+  warn "skipped (no scheduler). Run periodically: $BIN_DIR/mempalace-snapshot.sh"
+fi
+
+# ---------------------------------------------------------------------------
 step "graphify→mempalace reseed scheduler (nightly)"
 # Keeps mempalace's structural memory (wing graphify_<repo>) in sync with the code
 # graph by wipe-and-replace from graphify-out/GRAPH_REPORT.md. Runs OUT OF SESSION:
@@ -278,6 +313,16 @@ elif command -v systemctl >/dev/null 2>&1; then
 else
   warn "skipped (no scheduler). Run nightly: $BIN_DIR/graphify-reseed.sh $REPO_DIR"
 fi
+
+# ---------------------------------------------------------------------------
+step "mempalace Stop-hook timeout (anti-corruption)"
+# The plugin ships a 30s Stop-hook timeout; a slow capture flush gets SIGKILL'd
+# mid-write and corrupts the (non-atomic) HNSW+FTS5 index. Bump to 90s. The plugin
+# rewrites hooks.json on (re)install, so this is best-effort here (the plugin may
+# not be installed yet on first run) and MUST be re-run after 'claude' login and
+# after every mempalace plugin update.
+"$BIN_DIR/mempalace-stop-timeout.sh" 2>&1 | sed 's/^/  /' || true
+info "re-run '$BIN_DIR/mempalace-stop-timeout.sh' after 'claude' login and after mempalace plugin updates"
 
 # ---------------------------------------------------------------------------
 step "Verify"

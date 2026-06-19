@@ -36,7 +36,9 @@ used — reach for the right tool without being asked:
 - **Recall before re-deriving.** Before non-trivial work, or whenever I reference
   past work ("did we…", "how did we…", "the X fix", "last time"), search memory
   (`mempalace search`, `mempalace wake-up`, or the mempalace MCP tools —
-  search / traverse / kg_query) instead of reconstructing from scratch.
+  search / traverse / kg_query) instead of reconstructing from scratch. A
+  `PreToolUse` hook (`mempalace-recall-enforce.sh`) injects a once-per-session
+  MANDATORY reminder on the first search/explore action as a backstop.
 - A `UserPromptSubmit` hook surfaces relevant verbatim drawers each turn. When
   those hits are relevant, use them — but verify they still hold before relying on
   them; they reflect what was true when captured.

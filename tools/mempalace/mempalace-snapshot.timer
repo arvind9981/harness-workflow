@@ -1,0 +1,12 @@
+[Unit]
+Description=Snapshot the MemPalace palace every 6h (and shortly after login)
+
+[Timer]
+# Every 6 hours at :07 (off the :00 mark), plus a catch-up ~3min after start.
+OnCalendar=00/6:07:00
+OnStartupSec=3min
+Persistent=true
+AccuracySec=1min
+
+[Install]
+WantedBy=timers.target

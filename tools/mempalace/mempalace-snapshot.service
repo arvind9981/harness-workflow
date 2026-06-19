@@ -1,0 +1,10 @@
+[Unit]
+Description=MemPalace chroma.sqlite3 snapshot (rebuildable source of truth)
+# Don't run during shutdown.
+RefuseManualStart=no
+
+[Service]
+Type=oneshot
+Nice=10
+IOSchedulingClass=idle
+ExecStart=%h/.local/bin/mempalace-snapshot.sh
