@@ -13,7 +13,13 @@
 # ---- parent: re-exec detached, passing the hook payload on stdin, then exit ---
 if [ "${MEMPALACE_RECAP_CHILD:-}" != "1" ]; then
   payload="$(cat 2>/dev/null)"
-  MEMPALACE_RECAP_CHILD=1 setsid nohup bash "$0" >/dev/null 2>&1 <<<"$payload" &
+  # setsid isn't shipped on macOS; fall back to plain nohup+disown there.
+  if command -v setsid >/dev/null 2>&1; then
+    MEMPALACE_RECAP_CHILD=1 setsid nohup bash "$0" >/dev/null 2>&1 <<<"$payload" &
+  else
+    MEMPALACE_RECAP_CHILD=1 nohup bash "$0" >/dev/null 2>&1 <<<"$payload" &
+  fi
+  disown 2>/dev/null || true
   exit 0
 fi
 
@@ -42,8 +48,15 @@ THROTTLE="${MEMPALACE_RECAP_THROTTLE:-60}"   # seconds between regenerations per
 OLLAMA="${OLLAMA_HOST:-http://localhost:11434}"
 
 # Single writer per wing; throttle regenerations.
-exec 9>"$RECAP_DIR/.$wing.lock"
-flock -n 9 || exit 0
+# flock is Linux-only; fall back to an atomic mkdir lock on macOS.
+if command -v flock >/dev/null 2>&1; then
+  exec 9>"$RECAP_DIR/.$wing.lock"
+  flock -n 9 || exit 0
+else
+  _lockdir="$RECAP_DIR/.$wing.lock.d"
+  mkdir "$_lockdir" 2>/dev/null || exit 0
+  trap 'rmdir "$_lockdir" 2>/dev/null' EXIT
+fi
 stamp="$RECAP_DIR/.$wing.lastrun"
 now="$(date +%s)"; last="$(cat "$stamp" 2>/dev/null || echo 0)"; [[ "$last" =~ ^[0-9]+$ ]] || last=0
 [ "$((now - last))" -ge "$THROTTLE" ] || exit 0
