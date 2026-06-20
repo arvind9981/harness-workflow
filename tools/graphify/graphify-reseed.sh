@@ -42,7 +42,11 @@ for REPO_DIR in "$@"; do
     cd "$REPO_DIR" 2>/dev/null || { echo "graphify-reseed: cannot cd '$REPO_DIR' — skipping"; exit 0; }
 
     REPORT="graphify-out/GRAPH_REPORT.md"
-    WING="graphify_$(basename "$REPO_DIR" | tr -c 'a-zA-Z0-9_' '_')"
+    # Wing = graphify_<leaf>, hyphens preserved. $() strips the trailing newline;
+    # bash replaces only disallowed chars (the old `tr` turned the newline into a
+    # stray trailing '_' and hyphens into '_', mismatching the populated wings).
+    _leaf="$(basename "$REPO_DIR")"
+    WING="graphify_${_leaf//[^a-zA-Z0-9_-]/_}"
 
     # 1) Refresh the graph (AST-only, no API cost). Skip cleanly if graphify absent.
     if command -v graphify >/dev/null 2>&1; then

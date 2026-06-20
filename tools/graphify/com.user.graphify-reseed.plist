@@ -13,6 +13,12 @@
     <string>__HOME__/.local/bin/graphify-reseed.sh</string>
 __GRAPHIFY_REPO_ARGS__
   </array>
+  <!-- launchd uses a minimal PATH; add ~/.local/bin (graphify, mempalace) + homebrew. -->
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key>
+    <string>__HOME__/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+  </dict>
   <!-- No Weekday key => fires daily at the given Hour/Minute. -->
   <key>StartCalendarInterval</key>
   <dict>
