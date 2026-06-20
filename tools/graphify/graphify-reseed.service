@@ -4,6 +4,6 @@ Documentation=https://github.com/safishamsi/graphify
 
 [Service]
 Type=oneshot
-# __REPO__ is rendered to the repo path by init.sh at install time.
-ExecStart=%h/.local/bin/graphify-reseed.sh __REPO__
+# __GRAPHIFY_REPOS__ is rendered to the space-separated GRAPHIFY_REPOS list by init.sh.
+ExecStart=%h/.local/bin/graphify-reseed.sh __GRAPHIFY_REPOS__
 Nice=10

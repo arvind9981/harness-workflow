@@ -19,6 +19,15 @@ BIN_DIR="$HOME/.local/bin"
 UNIT_DIR="$HOME/.config/systemd/user"      # systemd user units (Linux)
 LAUNCH_DIR="$HOME/Library/LaunchAgents"    # launchd LaunchAgents (macOS)
 
+# Repos whose code graph is reseeded into mempalace nightly (one graphify_<repo>
+# wing each, wipe-and-replace from graphify-out/GRAPH_REPORT.md). Edit this list
+# to change what gets graphified. If left empty, falls back to this workflow repo.
+GRAPHIFY_REPOS=(
+  "$HOME/xebia/ACE-Agents"
+  "$HOME/xebia/X-ACE-INFRA"
+  "$HOME/xebia/X-ACE-UI"
+)
+
 # OS-derived hint string shown to the user (the service manager differs per OS).
 case "$OS" in
   Darwin) STATUS_HR="launchctl list | grep headroom-proxy" ;;
@@ -293,28 +302,37 @@ step "graphify→mempalace reseed scheduler (nightly)"
 # a live Claude session holds the mempalace write-lock, so an in-session mine would
 # deadlock — the job self-skips when the MCP server is up and retries next night.
 # See tools/graphify/graphify-reseed.sh.
+# Repos to reseed (graphify-reseed.sh takes one or more dirs); fall back to this repo.
+reseed_repos=("${GRAPHIFY_REPOS[@]:-$REPO_DIR}")
 if [ "$OS" = "Darwin" ] && command -v launchctl >/dev/null 2>&1; then
   dest="$LAUNCH_DIR/com.user.graphify-reseed.plist"
   mkdir -p "$LAUNCH_DIR"
   backup "$dest"
-  sed -e "s#__HOME__#$HOME#g" -e "s#__REPO__#$REPO_DIR#g" \
-    "$REPO_DIR/tools/graphify/com.user.graphify-reseed.plist" > "$dest"
+  # Render one <string> ProgramArguments entry per repo at the placeholder line.
+  # Pass the repo list as a single '|'-joined arg (BSD awk rejects newlines in -v).
+  repo_args="$(IFS='|'; printf '%s' "${reseed_repos[*]}")"
+  awk -v repos="$repo_args" '
+    /__GRAPHIFY_REPO_ARGS__/ { n=split(repos, a, "|"); for (i=1;i<=n;i++) printf "    <string>%s</string>\n", a[i]; next }
+    { print }
+  ' "$REPO_DIR/tools/graphify/com.user.graphify-reseed.plist" \
+    | sed "s#__HOME__#$HOME#g" > "$dest"
   launchctl unload "$dest" >/dev/null 2>&1 || true
-  launchctl load -w "$dest" && ok "nightly graphify reseed scheduled (launchd, 04:13)" \
+  launchctl load -w "$dest" && ok "nightly graphify reseed scheduled (launchd, 04:13) — ${#reseed_repos[@]} repo(s)" \
     || warn "could not load graphify-reseed plist"
 elif command -v systemctl >/dev/null 2>&1; then
   mkdir -p "$UNIT_DIR"
   backup "$UNIT_DIR/graphify-reseed.timer"
   cp "$REPO_DIR/tools/graphify/graphify-reseed.timer" "$UNIT_DIR/graphify-reseed.timer"
   backup "$UNIT_DIR/graphify-reseed.service"
-  sed "s#__REPO__#$REPO_DIR#g" \
+  repos_line="$(printf '%s ' "${reseed_repos[@]}")"; repos_line="${repos_line% }"
+  sed "s#__GRAPHIFY_REPOS__#${repos_line}#g" \
     "$REPO_DIR/tools/graphify/graphify-reseed.service" > "$UNIT_DIR/graphify-reseed.service"
   systemctl --user daemon-reload
   systemctl --user enable --now graphify-reseed.timer \
-    && ok "nightly graphify reseed scheduled (systemd timer, 04:13)" \
+    && ok "nightly graphify reseed scheduled (systemd timer, 04:13) — ${#reseed_repos[@]} repo(s)" \
     || warn "could not enable graphify-reseed.timer"
 else
-  warn "skipped (no scheduler). Run nightly: $BIN_DIR/graphify-reseed.sh $REPO_DIR"
+  warn "skipped (no scheduler). Run nightly: $BIN_DIR/graphify-reseed.sh ${reseed_repos[*]}"
 fi
 
 # ---------------------------------------------------------------------------

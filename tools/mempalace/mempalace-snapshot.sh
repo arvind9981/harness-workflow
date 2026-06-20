@@ -16,8 +16,15 @@ KEEP="${MEMPALACE_SNAPSHOT_KEEP:-14}"
 mkdir -p "$DEST_DIR"
 
 # Serialize against another snapshot run (non-blocking: skip if one is active).
-exec 9>"$DEST_DIR/.snapshot.lock"
-flock -n 9 || { echo "another snapshot in progress; skipping"; exit 0; }
+# flock is Linux-only; fall back to an atomic mkdir lock on macOS.
+if command -v flock >/dev/null 2>&1; then
+  exec 9>"$DEST_DIR/.snapshot.lock"
+  flock -n 9 || { echo "another snapshot in progress; skipping"; exit 0; }
+else
+  _lockdir="$DEST_DIR/.snapshot.lock.d"
+  mkdir "$_lockdir" 2>/dev/null || { echo "another snapshot in progress; skipping"; exit 0; }
+  trap 'rmdir "$_lockdir" 2>/dev/null' EXIT
+fi
 
 ts="$(date +%Y%m%d-%H%M%S)"
 tmp="$DEST_DIR/chroma-$ts.sqlite3"
