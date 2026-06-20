@@ -6,5 +6,14 @@
 # away from Claude Code so a hook timeout can't SIGKILL it mid-repair.
 # Emits no context (exit 0, no stdout).
 DEEP="$HOME/.claude/hooks/mempalace-health-deep.sh"
-[ -x "$DEEP" ] && setsid nohup "$DEEP" >/dev/null 2>&1 </dev/null &
+# setsid is Linux-only; on macOS fall back to nohup+disown (still detaches enough
+# that a hook timeout won't SIGKILL the worker mid-repair).
+if [ -x "$DEEP" ]; then
+  if command -v setsid >/dev/null 2>&1; then
+    setsid nohup "$DEEP" >/dev/null 2>&1 </dev/null &
+  else
+    nohup "$DEEP" >/dev/null 2>&1 </dev/null &
+  fi
+  disown 2>/dev/null || true
+fi
 exit 0

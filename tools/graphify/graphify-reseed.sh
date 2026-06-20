@@ -22,6 +22,10 @@ set -euo pipefail
 
 MP="${MEMPALACE_BIN:-$HOME/.local/bin/mempalace}"
 
+# timeout(1) is GNU coreutils — absent on stock macOS. Use it when present,
+# otherwise degrade to no time limit (the mine still completes).
+_to() { _s="$1"; shift; if command -v timeout >/dev/null 2>&1; then timeout "$_s" "$@"; else "$@"; fi; }
+
 # Deadlock guard: never run while a mempalace MCP server holds the palace.
 # Checked once up front — if a session is live, skip the whole run.
 if pgrep -f 'mempalace-mcp' >/dev/null 2>&1; then
@@ -57,7 +61,7 @@ for REPO_DIR in "$@"; do
     trap 'rm -rf "$TMP"' EXIT
     cp "$REPORT" "$TMP/"
     # `timeout` is a backstop in case a session opened mid-run and grabbed the lock.
-    timeout 600 "$MP" mine "$TMP" --wing "$WING" --no-gitignore --agent graphify-reseed >/dev/null \
+    _to 600 "$MP" mine "$TMP" --wing "$WING" --no-gitignore --agent graphify-reseed >/dev/null \
       && echo "graphify-reseed: wing '$WING' reseeded from $REPORT" \
       || { echo "graphify-reseed: mine failed or timed out in '$REPO_DIR' (lock held?) — wing left wiped, will retry next run"; exit 1; }
   ) || rc=1

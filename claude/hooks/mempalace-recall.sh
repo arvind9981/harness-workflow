@@ -25,9 +25,13 @@ MAX_PER_SRC="${MEMPALACE_RECALL_MAX_PER_SRC:-2}"   # cap chunks from one source 
 MAX_HITS="${MEMPALACE_RECALL_MAX_HITS:-5}"         # final number of drawers injected
 CANDIDATES="${MEMPALACE_RECALL_CANDIDATES:-12}"    # over-fetch, then filter down
 
+# timeout(1) is GNU coreutils — absent on stock macOS. Use it when present,
+# otherwise degrade to running the command without a time limit.
+_to() { _s="$1"; shift; if command -v timeout >/dev/null 2>&1; then timeout "$_s" "$@"; else "$@"; fi; }
+
 # Cap query length; run the local palace search (semantic + bm25), strip ANSI.
 q="$(printf '%s' "$prompt" | head -c 400)"
-raw="$(timeout 8 "$MEMPALACE" search "$q" --results "$CANDIDATES" < /dev/null 2>/dev/null \
+raw="$(_to 8 "$MEMPALACE" search "$q" --results "$CANDIDATES" < /dev/null 2>/dev/null \
   | sed -r 's/\x1B\[[0-9;]*[mK]//g')"
 
 # Only proceed when there were real hits (search prints "Source:" per result).

@@ -23,20 +23,26 @@
 #
 # Idempotent — re-applies only when PATCH_VERSION changes.
 set -euo pipefail
-PATCH_VERSION=1
+PATCH_VERSION=2
 shopt -s nullglob
 
 # --- the patched wrapper written into the plugin cache ----------------------
 read -r -d '' PATCHED <<'PATCHEOF' || true
 #!/bin/bash
-# MemPalace Stop Hook — PATCHED by claude-workflow (MEMPAL_STOP_DETACH v1).
+# MemPalace Stop Hook — PATCHED by claude-workflow (MEMPAL_STOP_DETACH v2).
 # Detached + single-flight + throttled. Re-applied by mempalace-stop-detach.sh
 # after plugin updates. Do not hand-edit; edit the installer instead.
 
 # ---- parent: capture stdin payload, re-exec detached, return now -----------
 if [ "${MEMPAL_STOP_DETACH_CHILD:-}" != "1" ]; then
   __payload="$(cat 2>/dev/null)"
-  MEMPAL_STOP_DETACH_CHILD=1 setsid nohup bash "$0" >/dev/null 2>&1 <<<"$__payload" &
+  # setsid is Linux-only; on macOS fall back to nohup+disown.
+  if command -v setsid >/dev/null 2>&1; then
+    MEMPAL_STOP_DETACH_CHILD=1 setsid nohup bash "$0" >/dev/null 2>&1 <<<"$__payload" &
+  else
+    MEMPAL_STOP_DETACH_CHILD=1 nohup bash "$0" >/dev/null 2>&1 <<<"$__payload" &
+  fi
+  disown 2>/dev/null || true
   exit 0
 fi
 
@@ -46,8 +52,15 @@ mkdir -p "$STATE_DIR" 2>/dev/null || true
 THROTTLE="${MEMPALACE_STOP_THROTTLE:-300}"   # min seconds between ingests
 
 # One writer at a time; if an ingest is already running, skip this turn.
-exec 9>"$STATE_DIR/.stop-hook.lock"
-flock -n 9 || exit 0
+# flock is Linux-only; fall back to an atomic mkdir lock on macOS.
+if command -v flock >/dev/null 2>&1; then
+  exec 9>"$STATE_DIR/.stop-hook.lock"
+  flock -n 9 || exit 0
+else
+  __lockdir="$STATE_DIR/.stop-hook.lock.d"
+  mkdir "$__lockdir" 2>/dev/null || exit 0
+  trap 'rmdir "$__lockdir" 2>/dev/null' EXIT
+fi
 
 # Skip if we ingested recently (detached, so this is CPU/granularity, not latency).
 stamp="$STATE_DIR/.stop-hook.lastrun"

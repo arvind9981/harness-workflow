@@ -11,6 +11,10 @@ MEMPALACE="$HOME/.local/bin/mempalace"
 [ -x "$MEMPALACE" ] || exit 0
 command -v jq >/dev/null 2>&1 || exit 0
 
+# timeout(1) is GNU coreutils — absent on stock macOS. Use it when present,
+# otherwise degrade to running the command without a time limit.
+_to() { _s="$1"; shift; if command -v timeout >/dev/null 2>&1; then timeout "$_s" "$@"; else "$@"; fi; }
+
 MAX_BYTES="${MEMPALACE_CTX_MAX_BYTES:-2200}"   # hard cap on injected context
 
 # cwd comes from the hook payload (fallback to $PWD); wing = slug of its leaf dir.
@@ -20,9 +24,9 @@ leaf="$(basename "$cwd")"
 wing="$(printf '%s' "$leaf" | tr '[:upper:] -' '[:lower:]__')"
 
 # Wing-scoped wake-up; fall back to unscoped if the wing has nothing.
-raw="$(timeout 8 "$MEMPALACE" wake-up --wing "$wing" < /dev/null 2>/dev/null | sed -r 's/\x1B\[[0-9;]*[mK]//g')"
+raw="$(_to 8 "$MEMPALACE" wake-up --wing "$wing" < /dev/null 2>/dev/null | sed -r 's/\x1B\[[0-9;]*[mK]//g')"
 printf '%s' "$raw" | grep -q '[A-Za-z]' || \
-  raw="$(timeout 8 "$MEMPALACE" wake-up < /dev/null 2>/dev/null | sed -r 's/\x1B\[[0-9;]*[mK]//g')"
+  raw="$(_to 8 "$MEMPALACE" wake-up < /dev/null 2>/dev/null | sed -r 's/\x1B\[[0-9;]*[mK]//g')"
 [ -n "$raw" ] || exit 0
 
 # Strip transcript/tool/command noise that pollutes the recency-scored L1 story:
@@ -32,15 +36,15 @@ ctx="$(printf '%s' "$raw" | grep -ivE \
   'command-message|command-name|command-args|local-command|local-stdout|stdout>|<command|</|MCP server|Authorization header|badly formatted|Traceback|EOFError|\.credentials|redacted|REDACTED|drwx|\.rw-|→|/doctor|No identity configured' \
   | grep -ivE '\[Bash\]|python3|grep -|sed |curl |jq |systemctl|ollama |=== |```|for f in| -c "|\$\(|&&|\|\||installed_plugins|\.jsonl\)' \
   | grep -ivE 'Wake-up text|more in L3|^=+$|^-{3,}$' \
-  | grep -vE '^\s*[-•]\s*$' | sed '/^[[:space:]]*$/N;/^[[:space:]]*\n$/D')"
+  | grep -vE '^\s*[-•]\s*$' | awk 'BEGIN{b=0} /^[[:space:]]*$/{b++;next} {if(b)print ""; b=0; print}')"
 
 # If filtering left the L1 story with no surviving bullets, drop the empty
 # "## L1 …" scaffold so we inject just the (clean) identity rather than clutter.
 if ! printf '%s' "$ctx" | grep -qE '^\s*[-•]\s+\S'; then
   ctx="$(printf '%s' "$ctx" | sed '/## L1/,$d')"
 fi
-# Trim trailing blank lines.
-ctx="$(printf '%s' "$ctx" | sed -e :a -e '/^[[:space:]]*$/{$d;N;ba}')"
+# Trim trailing blank lines (portable awk; the sed -e :a/ba idiom is GNU-only).
+ctx="$(printf '%s' "$ctx" | awk '{a[NR]=$0} /[^[:space:]]/{last=NR} END{for(i=1;i<=last;i++)print a[i]}')"
 
 # Require some real signal after filtering.
 printf '%s' "$ctx" | grep -q '[A-Za-z]' || exit 0

@@ -29,9 +29,19 @@ mkdir -p "$STATE" "$(dirname "$LOG")"
 
 log() { printf '%s  %s\n' "$(date -Is)" "$*" >> "$LOG"; }
 
-# Single worker at a time (non-blocking).
-exec 9>"$STATE/.health.lock"
-flock -n 9 || exit 0
+# timeout(1) is GNU coreutils — absent on stock macOS. Use it when present,
+# otherwise degrade to running the command without a time limit.
+_to() { _s="$1"; shift; if command -v timeout >/dev/null 2>&1; then timeout "$_s" "$@"; else "$@"; fi; }
+
+# Single worker at a time (non-blocking). flock is Linux-only; mkdir-lock on macOS.
+if command -v flock >/dev/null 2>&1; then
+  exec 9>"$STATE/.health.lock"
+  flock -n 9 || exit 0
+else
+  _hlock="$STATE/.health.lock.d"
+  mkdir "$_hlock" 2>/dev/null || exit 0
+  trap 'rmdir "$_hlock" 2>/dev/null' EXIT
+fi
 
 # ---- 1. stale lock cleanup (cheap, every run) -----------------------------
 for lk in "$LOCKS"/mine_palace_*.lock; do
@@ -82,18 +92,18 @@ fi
 echo "$now" > "$STAMP"
 
 # A healthy drawers query returns in <1s; a corrupt HNSW deadlocks -> timeout.
-timeout "$PROBE_TIMEOUT" "$MEMPALACE" search "health probe alpha" --results 1 </dev/null >/dev/null 2>&1
+_to "$PROBE_TIMEOUT" "$MEMPALACE" search "health probe alpha" --results 1 </dev/null >/dev/null 2>&1
 rc=$?
 if [ "$rc" -eq 0 ]; then
   exit 0   # healthy
 fi
 
 log "HNSW probe FAILED (rc=$rc; 124=deadlock/timeout) -> rebuilding index from sqlite"
-if timeout 600 "$MEMPALACE" repair --mode from-sqlite --archive-existing --yes </dev/null >>"$LOG" 2>&1; then
+if _to 600 "$MEMPALACE" repair --mode from-sqlite --archive-existing --yes </dev/null >>"$LOG" 2>&1; then
   # from-sqlite does not repair FTS5; rebuild it, then re-record embedder identity.
   sqlite3 "$DB" "INSERT INTO embedding_fulltext_search(embedding_fulltext_search) VALUES('rebuild');" 2>>"$LOG" || true
   "$MEMPALACE" palace set-embedder --model "$EMBEDDER" </dev/null >>"$LOG" 2>&1 || true
-  if timeout "$PROBE_TIMEOUT" "$MEMPALACE" search "health probe alpha" --results 1 </dev/null >/dev/null 2>&1; then
+  if _to "$PROBE_TIMEOUT" "$MEMPALACE" search "health probe alpha" --results 1 </dev/null >/dev/null 2>&1; then
     log "self-heal SUCCESS: search healthy after rebuild"
   else
     log "self-heal INCOMPLETE: search still failing after rebuild — manual look needed"
