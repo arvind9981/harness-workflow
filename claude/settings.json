@@ -109,6 +109,18 @@
           }
         ]
       }
+    ],
+    "SessionEnd": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "__HOME__/.claude/hooks/mempalace-catchup-rebuild-sessionend.sh",
+            "timeout": 15
+          }
+        ]
+      }
     ]
   },
   "enabledPlugins": {
@@ -138,5 +150,9 @@
       }
     }
   },
-  "theme": "dark"
+  "theme": "dark",
+  "statusLine": {
+    "type": "command",
+    "command": "bash __HOME__/.claude/statusline-command.sh"
+  }
 }

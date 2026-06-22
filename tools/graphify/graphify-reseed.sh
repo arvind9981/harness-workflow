@@ -33,10 +33,43 @@ SNAPSHOT="${MEMPALACE_SNAPSHOT_BIN:-$HOME/.local/bin/mempalace-snapshot.sh}"
 
 [ "$#" -gt 0 ] || set -- "$PWD"
 
+# Helper: is a mempalace MCP server live? Checked at start, AGAIN right before the
+# irreversible wipe, AND polled throughout the mine. The old launch-only check left
+# a TOCTOU gap — a Claude session opening mid-run meant two concurrent chroma
+# writers (hang + FTS5 corruption), which is exactly how a reseed once ran 3h+.
+mcp_live() { pgrep -f 'mempalace-mcp' >/dev/null 2>&1; }
+
+# Cumulative CPU seconds for a PID, parsed from `ps -o time=` (portable macOS/Linux).
+# Used as a no-activity probe: if this stops advancing, the mine is HUNG — e.g.
+# blocked on the chroma DB lock, the exact signature of the 3.5h stall (~82s CPU
+# over 3.5h wall). Empty output (process gone / unreadable) -> caller treats as
+# "no sample", never as progress.
+cpu_secs() {
+  ps -o time= -p "$1" 2>/dev/null | awk '
+    { gsub(/ /,""); n=$0; sub(/\.[0-9]+$/,"",n)
+      d=0; if (n ~ /-/) { split(n,x,"-"); d=x[1]; n=x[2] }
+      c=split(n,p,":")
+      if (c==3)      s=p[1]*3600+p[2]*60+p[3]
+      else if (c==2) s=p[1]*60+p[2]
+      else           s=p[1]
+      print d*86400+s }'
+}
+
 # --- Out-of-session guard: a competing CLI/store writer corrupts the live palace.
-if pgrep -f 'mempalace-mcp' >/dev/null 2>&1; then
+if mcp_live; then
   echo "graphify-reseed: mempalace MCP server is live — skipping (out-of-session only; close Claude first)"
   exit 0
+fi
+
+# --- Single-runner lock: stop two reseeds from clobbering the store concurrently.
+# flock is util-linux (Linux); stock macOS lacks it -> degrade with a warning.
+LOCK="${GRAPHIFY_RESEED_LOCK:-$HOME/.mempalace/reseed.lock}"
+mkdir -p "$(dirname "$LOCK")" 2>/dev/null || true
+if command -v flock >/dev/null 2>&1; then
+  exec 9>"$LOCK"
+  flock -n 9 || { echo "graphify-reseed: another reseed holds $LOCK — skipping"; exit 0; }
+else
+  echo "graphify-reseed: WARNING flock unavailable — concurrent-reseed protection degraded"
 fi
 [ -x "$MP" ] || command -v mempalace >/dev/null 2>&1 || { echo "graphify-reseed: mempalace not found"; exit 1; }
 [ -x "$PY" ] || { echo "graphify-reseed: python interpreter not found at $PY"; exit 1; }
@@ -67,6 +100,13 @@ for REPO_DIR in "$@"; do
     STAGE="$STAGE_ROOT/$_leaf"
     mkdir -p "$STAGE"; rm -f "$STAGE"/* 2>/dev/null || true; cp "$REPORT" "$STAGE/"
 
+    # Re-check just before the IRREVERSIBLE wipe: a Claude session may have opened
+    # during the slow 'graphify update' above. Closes most of the launch-time gap.
+    if mcp_live; then
+      echo "graphify-reseed: MCP server appeared before wipe — skipping '$WING' (out-of-session only)"
+      exit 0
+    fi
+
     # 3) WIPE the wing at the store level (sync can't — see header).
     "$PY" - "$PALACE" "$WING" <<'PY' || { echo "graphify-reseed: wipe failed for $WING"; exit 1; }
 import sys
@@ -82,8 +122,38 @@ with mine_palace_lock(palace):
     print(f"  wiped wing {wing} (had {n if n >= 0 else '?'} drawers)")
 PY
 
-    # 4) Mine fresh from the stable path. Idempotent on future runs (same source_file).
-    if "$MP" mine "$STAGE" --wing "$WING" --no-gitignore --agent graphify-reseed >/dev/null 2>&1; then
+    # 4) Mine fresh from the stable path, but guard the WHOLE run: the mine can take
+    # minutes, and a Claude session opening mid-mine is the two-writer case that
+    # hangs/corrupts chroma. Run it backgrounded and poll — abort the instant an MCP
+    # server appears, or if it blows past the hang cap. Bash-only (no flock/timeout),
+    # so it works on stock macOS. A killed mine leaves the wing PARTIAL, but the
+    # pre-wipe snapshot makes that recoverable and the SessionStart in-process mine
+    # refills it. Idempotent on future runs (same source_file).
+    "$MP" mine "$STAGE" --wing "$WING" --no-gitignore --agent graphify-reseed >/dev/null 2>&1 &
+    _mine_pid=$!
+    # Watchdog: kill the mine on ANY of three conditions, so it can never sit for
+    # hours like before — (a) an MCP server appears (two-writer hazard), (b) NO
+    # ACTIVITY: CPU time stops advancing for _stall s (hung / lock-blocked), or
+    # (c) a hard wall-clock cap. All env-tunable; all bash-only (no flock/timeout).
+    SECONDS=0; _abort=""
+    _cap="${GRAPHIFY_RESEED_MINE_CAP:-1200}"   # hard wall-clock ceiling (s)
+    _stall="${GRAPHIFY_RESEED_STALL:-180}"     # kill if CPU flat this long (s)
+    _poll="${GRAPHIFY_RESEED_POLL:-5}"         # sample interval (s)
+    _last_cpu=-1; _stall_since=0
+    while kill -0 "$_mine_pid" 2>/dev/null; do
+      if mcp_live; then _abort="MCP server appeared mid-mine"; break; fi
+      _cpu="$(cpu_secs "$_mine_pid")"
+      if [ -n "$_cpu" ] && [ "$_cpu" != "$_last_cpu" ]; then _last_cpu="$_cpu"; _stall_since="$SECONDS"; fi
+      if [ "$(( SECONDS - _stall_since ))" -ge "$_stall" ]; then _abort="no activity for ${_stall}s (hung — CPU time flat)"; break; fi
+      if [ "$SECONDS" -ge "$_cap" ]; then _abort="exceeded ${_cap}s wall-clock cap"; break; fi
+      sleep "$_poll"
+    done
+    if [ -n "$_abort" ]; then
+      kill -TERM "$_mine_pid" 2>/dev/null || true; wait "$_mine_pid" 2>/dev/null || true
+      echo "graphify-reseed: ABORTED mine for '$WING' ($_abort) — wing left PARTIAL; snapshot taken, re-run out-of-session or let the SessionStart mine refill"
+      exit 1
+    fi
+    if wait "$_mine_pid"; then
       echo "graphify-reseed: wing '$WING' reseeded from $REPORT"
     else
       echo "graphify-reseed: mine failed in '$REPO_DIR'"

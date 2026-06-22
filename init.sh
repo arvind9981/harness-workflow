@@ -118,6 +118,12 @@ uv tool install --upgrade mempalace >/dev/null 2>&1 && ok "mempalace installed/u
   || die "uv tool install mempalace failed"
 command -v mempalace-mcp >/dev/null 2>&1 && ok "mempalace-mcp (native MCP) present" \
   || warn "mempalace-mcp missing — MCP wiring will fail"
+# Re-apply the HNSW divergence-threshold patch (chroma #6852). A `uv tool upgrade`
+# overwrites mempalace's site-packages, so this must run after every (re)install.
+# Idempotent + defensive: no-op if already patched, warns (does not fail) if the
+# stock constants have changed. Without it, a lagging HNSW deadlocks the MCP on its
+# first vector query instead of falling back to BM25. See the script header.
+bash "$REPO_DIR/tools/mempalace/patch-divergence-threshold.sh" || warn "divergence-threshold patch did not apply cleanly (review manually)"
 
 # ---------------------------------------------------------------------------
 step "Install graphify (code knowledge graph)"
@@ -187,6 +193,12 @@ if [ -f "$REPO_DIR/claude/CLAUDE.md" ]; then
   cp "$REPO_DIR/claude/CLAUDE.md" "$CLAUDE_DIR/CLAUDE.md"
   ok "CLAUDE.md (global standing instructions)"
 fi
+# statusline script: deploy to ~/.claude (referenced by settings.json statusLine.command)
+if [ -f "$REPO_DIR/claude/statusline-command.sh" ]; then
+  backup "$CLAUDE_DIR/statusline-command.sh"
+  install -m 0755 "$REPO_DIR/claude/statusline-command.sh" "$CLAUDE_DIR/statusline-command.sh"
+  ok "statusline-command.sh -> $CLAUDE_DIR/"
+fi
 # hooks: deploy any repo hook scripts (e.g. mempalace recall) referenced by settings.json
 if [ -d "$REPO_DIR/claude/hooks" ]; then
   mkdir -p "$CLAUDE_DIR/hooks"
@@ -231,6 +243,12 @@ step "Seed mempalace (memory) — one-time setup"
 # one-time, network/disk-heavy step, so we guide rather than auto-run on every init.
 if [ -d "$HOME/.mempalace/palace" ]; then
   ok "mempalace palace already present at ~/.mempalace/palace"
+  # Record the embedder identity (minilm) on legacy palaces that predate RFC 001.
+  # Without it, every embedding op prints EmbedderIdentityUnknownWarning. Idempotent:
+  # re-running just confirms the already-recorded identity. Does NOT re-embed.
+  mempalace palace set-embedder --model minilm >/dev/null 2>&1 \
+    && ok "mempalace embedder identity recorded (minilm)" \
+    || warn "could not record mempalace embedder identity"
 else
   info "first-time setup (one-time, ~300MB model + indexing):"
   info "  mempalace init \"\$HOME\"                                  # create the global palace"
