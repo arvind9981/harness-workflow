@@ -19,9 +19,10 @@ BIN_DIR="$HOME/.local/bin"
 UNIT_DIR="$HOME/.config/systemd/user"      # systemd user units (Linux)
 LAUNCH_DIR="$HOME/Library/LaunchAgents"    # launchd LaunchAgents (macOS)
 
-# Repos whose code graph is reseeded into mempalace nightly (one graphify_<repo>
-# wing each, wipe-and-replace from graphify-out/GRAPH_REPORT.md). Edit this list
-# to change what gets graphified. If left empty, falls back to this workflow repo.
+# Repos whose code graph is reseeded into mempalace (one graphify_<repo> wing each,
+# wipe-and-replace from graphify-out/GRAPH_REPORT.md), refreshed by the throttled
+# SessionStart hook. Edit this list to change what gets graphified. If left empty,
+# falls back to this workflow repo.
 GRAPHIFY_REPOS=(
   "$HOME/xebia/ACE-Agents"
   "$HOME/xebia/X-ACE-INFRA"
@@ -296,43 +297,32 @@ else
 fi
 
 # ---------------------------------------------------------------------------
-step "graphify→mempalace reseed scheduler (nightly)"
-# Keeps mempalace's structural memory (wing graphify_<repo>) in sync with the code
-# graph by wipe-and-replace from graphify-out/GRAPH_REPORT.md. Runs OUT OF SESSION:
-# a live Claude session holds the mempalace write-lock, so an in-session mine would
-# deadlock — the job self-skips when the MCP server is up and retries next night.
-# See tools/graphify/graphify-reseed.sh.
-# Repos to reseed (graphify-reseed.sh takes one or more dirs); fall back to this repo.
+step "graphify→mempalace reseed (SessionStart hook)"
+# Reseeding is triggered by a throttled SessionStart hook
+# (claude/hooks/graphify-reseed-session.sh), NOT a wall-clock cron: the laptop is
+# off at night, so a nightly timer never fires. The hook runs when a session
+# starts (machine on), at most once per ~12h. It is NUDGE-ONLY: it asks the agent
+# (via additionalContext) to refresh through the in-process MCP mine tool — the
+# only safe in-session writer — and mines nothing itself. A competing CLI mine
+# alongside the live MCP server corrupts the palace's FTS5 index, so the hook never
+# runs one. See claude/hooks/graphify-reseed-session.sh.
 reseed_repos=("${GRAPHIFY_REPOS[@]:-$REPO_DIR}")
+# Persist the repo list for the hook to read.
+mkdir -p "$HOME/.mempalace"
+printf '%s\n' "${reseed_repos[@]}" > "$HOME/.mempalace/graphify-repos.conf"
+ok "reseed repo list -> ~/.mempalace/graphify-repos.conf (${#reseed_repos[@]} repo(s))"
+# Migrate older installs: remove the now-retired nightly cron if present.
 if [ "$OS" = "Darwin" ] && command -v launchctl >/dev/null 2>&1; then
-  dest="$LAUNCH_DIR/com.user.graphify-reseed.plist"
-  mkdir -p "$LAUNCH_DIR"
-  backup "$dest"
-  # Render one <string> ProgramArguments entry per repo at the placeholder line.
-  # Pass the repo list as a single '|'-joined arg (BSD awk rejects newlines in -v).
-  repo_args="$(IFS='|'; printf '%s' "${reseed_repos[*]}")"
-  awk -v repos="$repo_args" '
-    /__GRAPHIFY_REPO_ARGS__/ { n=split(repos, a, "|"); for (i=1;i<=n;i++) printf "    <string>%s</string>\n", a[i]; next }
-    { print }
-  ' "$REPO_DIR/tools/graphify/com.user.graphify-reseed.plist" \
-    | sed "s#__HOME__#$HOME#g" > "$dest"
-  launchctl unload "$dest" >/dev/null 2>&1 || true
-  launchctl load -w "$dest" && ok "nightly graphify reseed scheduled (launchd, 04:13) — ${#reseed_repos[@]} repo(s)" \
-    || warn "could not load graphify-reseed plist"
+  old="$LAUNCH_DIR/com.user.graphify-reseed.plist"
+  if [ -f "$old" ]; then launchctl unload "$old" >/dev/null 2>&1 || true; rm -f "$old"; ok "removed retired nightly reseed cron (now session-triggered)"; fi
 elif command -v systemctl >/dev/null 2>&1; then
-  mkdir -p "$UNIT_DIR"
-  backup "$UNIT_DIR/graphify-reseed.timer"
-  cp "$REPO_DIR/tools/graphify/graphify-reseed.timer" "$UNIT_DIR/graphify-reseed.timer"
-  backup "$UNIT_DIR/graphify-reseed.service"
-  repos_line="$(printf '%s ' "${reseed_repos[@]}")"; repos_line="${repos_line% }"
-  sed "s#__GRAPHIFY_REPOS__#${repos_line}#g" \
-    "$REPO_DIR/tools/graphify/graphify-reseed.service" > "$UNIT_DIR/graphify-reseed.service"
-  systemctl --user daemon-reload
-  systemctl --user enable --now graphify-reseed.timer \
-    && ok "nightly graphify reseed scheduled (systemd timer, 04:13) — ${#reseed_repos[@]} repo(s)" \
-    || warn "could not enable graphify-reseed.timer"
-else
-  warn "skipped (no scheduler). Run nightly: $BIN_DIR/graphify-reseed.sh ${reseed_repos[*]}"
+  old="$UNIT_DIR/graphify-reseed.timer"
+  if [ -f "$old" ]; then
+    systemctl --user disable --now graphify-reseed.timer >/dev/null 2>&1 || true
+    rm -f "$UNIT_DIR/graphify-reseed.timer" "$UNIT_DIR/graphify-reseed.service"
+    systemctl --user daemon-reload >/dev/null 2>&1 || true
+    ok "removed retired nightly reseed timer (now session-triggered)"
+  fi
 fi
 
 # ---------------------------------------------------------------------------

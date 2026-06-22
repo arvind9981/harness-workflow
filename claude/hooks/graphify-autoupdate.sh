@@ -3,9 +3,10 @@
 # `graphify query` stays accurate within a session. AST-only, no API cost.
 #
 # This is the cheap half of the graphify↔mempalace hybrid: it keeps
-# graphify-out/GRAPH_REPORT.md current on edits; the nightly graphify-reseed.timer
-# then propagates that report into mempalace OUT OF SESSION (mining mid-session
-# deadlocks on the palace write-lock). This hook never touches mempalace.
+# graphify-out/GRAPH_REPORT.md current on edits; a throttled SessionStart hook
+# (graphify-reseed-session.sh) then nudges the agent to propagate that report into
+# mempalace via the in-process MCP mine tool (a competing CLI mine would corrupt
+# the live palace). This hook never touches mempalace.
 #
 # Self-guarding: no-op unless a graph already exists (never builds from scratch),
 # single-flight via pgrep, and detached so the edit returns immediately.

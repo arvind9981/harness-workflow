@@ -28,6 +28,11 @@
             "command": "__HOME__/.claude/hooks/mempalace-recap-show.sh",
             "timeout": 5,
             "statusMessage": "Recalling where you left off…"
+          },
+          {
+            "type": "command",
+            "command": "__HOME__/.claude/hooks/graphify-reseed-session.sh",
+            "timeout": 10
           }
         ]
       }

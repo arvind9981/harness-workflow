@@ -1,12 +1,14 @@
 #!/usr/bin/env bash
 # graphify-reseed — keep mempalace's structural memory in sync with the code graph.
 #
-# WHY THIS RUNS OUT OF SESSION (nightly timer, not a per-edit hook):
-#   A live Claude session holds the mempalace MCP server's palace write-lock.
-#   A separate `mempalace mine` process then blocks on that lock forever (verified:
-#   the miner sits at ~0% CPU holding mine_palace_*.lock). So the reseed must run
-#   when no session is active. As a backstop it also detects a running MCP server
-#   and skips that night rather than hang.
+# RUNS ONLY WHEN NO MCP SERVER IS LIVE (standalone / manual out-of-session reseed):
+#   A CLI `mempalace mine` running alongside a live mempalace MCP server writes the
+#   shared chroma DB concurrently and corrupts its FTS5 index (observed: "malformed
+#   inverted index"). The write-lock does NOT make this safe under sustained load,
+#   so this script SKIPS whenever a mempalace-mcp process is running (exits 0).
+#   In-session refreshes instead go through the in-process MCP mine tool, nudged by
+#   the SessionStart hook (claude/hooks/graphify-reseed-session.sh). Each mine here
+#   is still wrapped in a portable watchdog (_run_bounded) as a hang backstop.
 #
 # CYCLE (wipe-and-replace => zero staleness), run once per repo:
 #   1. graphify update .                 refresh the AST graph (free, no API)
@@ -22,14 +24,25 @@ set -euo pipefail
 
 MP="${MEMPALACE_BIN:-$HOME/.local/bin/mempalace}"
 
-# timeout(1) is GNU coreutils — absent on stock macOS. Use it when present,
-# otherwise degrade to no time limit (the mine still completes).
-_to() { _s="$1"; shift; if command -v timeout >/dev/null 2>&1; then timeout "$_s" "$@"; else "$@"; fi; }
+# Run "$@" with a hard wall-clock limit, portably (timeout(1) is absent on macOS).
+# Backgrounds the command and kills it if it overruns. Returns 124 on timeout,
+# else the command's own exit code.
+_run_bounded() {
+  _limit="$1"; shift
+  "$@" & _wpid=$!
+  _w=0
+  while kill -0 "$_wpid" 2>/dev/null && [ "$_w" -lt "$_limit" ]; do sleep 1; _w=$((_w+1)); done
+  if kill -0 "$_wpid" 2>/dev/null; then kill -9 "$_wpid" 2>/dev/null; wait "$_wpid" 2>/dev/null; return 124; fi
+  wait "$_wpid"
+}
 
-# Deadlock guard: never run while a mempalace MCP server holds the palace.
-# Checked once up front — if a session is live, skip the whole run.
+# Concurrency guard (RESTORED): a CLI `mempalace mine` running alongside a live
+# MCP server writes the shared chroma DB concurrently and corrupts its FTS5 index
+# (observed: "malformed inverted index"). The lock does NOT make this safe under
+# sustained load. So skip whenever any mempalace-mcp is running — an in-session
+# refresh must go through the in-process server (MCP mine tool), not this process.
 if pgrep -f 'mempalace-mcp' >/dev/null 2>&1; then
-  echo "graphify-reseed: mempalace MCP server is live (active session) — skipping to avoid lock deadlock"
+  echo "graphify-reseed: mempalace MCP server is live — skipping (a competing CLI mine corrupts the palace)"
   exit 0
 fi
 
@@ -64,10 +77,14 @@ for REPO_DIR in "$@"; do
     TMP="$(mktemp -d)"
     trap 'rm -rf "$TMP"' EXIT
     cp "$REPORT" "$TMP/"
-    # `timeout` is a backstop in case a session opened mid-run and grabbed the lock.
-    _to 600 "$MP" mine "$TMP" --wing "$WING" --no-gitignore --agent graphify-reseed >/dev/null \
-      && echo "graphify-reseed: wing '$WING' reseeded from $REPORT" \
-      || { echo "graphify-reseed: mine failed or timed out in '$REPO_DIR' (lock held?) — wing left wiped, will retry next run"; exit 1; }
+    # Bounded mine: mempalace's lock serializes us against any live session; the
+    # watchdog kills a mine that can't finish within the limit (retried next run).
+    if _run_bounded 600 "$MP" mine "$TMP" --wing "$WING" --no-gitignore --agent graphify-reseed >/dev/null 2>&1; then
+      echo "graphify-reseed: wing '$WING' reseeded from $REPORT"
+    else
+      echo "graphify-reseed: mine failed or timed out in '$REPO_DIR' — wing left wiped, will retry next run"
+      exit 1
+    fi
   ) || rc=1
 done
 

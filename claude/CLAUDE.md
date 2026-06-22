@@ -59,16 +59,19 @@ used — reach for the right tool without being asked:
   via a local model (`gemma4:e4b`, on-device, `think:false`), and a SessionStart
   hook (`mempalace-recap-show.sh`) shows it next time. Falls back to a cleaned
   list of recent prompts if Ollama/the model is unavailable.
-- **Graphify auto-syncs into mempalace (nightly, wipe-and-replace).** A PostToolUse
-  hook (`graphify-autoupdate.sh`) runs `graphify update .` on every code change to
-  keep the graph fresh; a nightly timer (`graphify-reseed.sh`, 04:13) then wipes the
-  `graphify_<repo>` wing and re-mines `GRAPH_REPORT.md` into it — so structural recall
-  always mirrors the current graph with no staleness and no manual curation. The
-  reseed runs **out of session**: a live Claude session holds the mempalace
-  write-lock, so an in-session `mempalace mine` deadlocks. The job self-skips when the
-  MCP server is up and retries next night — so **don't add an in-session mining
-  hook**. To force a refresh now, close Claude and run
-  `~/.local/bin/graphify-reseed.sh <repo>`.
+- **Graphify auto-syncs into mempalace (session-triggered, wipe-and-replace).** A
+  PostToolUse hook (`graphify-autoupdate.sh`) runs `graphify update .` on every code
+  change to keep `GRAPH_REPORT.md` fresh; a throttled SessionStart hook
+  (`graphify-reseed-session.sh`, at most once per ~12h) then NUDGES the agent to
+  re-mine that report into the `graphify_<repo>` wing — so structural recall mirrors
+  the current graph with no manual curation. The refresh goes through the **in-process
+  MCP `mine` tool** (the only safe in-session writer): a separate CLI `mempalace mine`
+  running alongside a live MCP server writes the shared chroma DB concurrently and
+  corrupts its FTS5 index — so **never run `mempalace mine` (or `graphify-reseed.sh`)
+  from a hook or by hand while a session is live**. The standalone
+  `~/.local/bin/graphify-reseed.sh <repo>` still exists for out-of-session refreshes
+  and self-skips if an MCP server is up. (Replaces the old nightly 04:13 timer, which
+  never fired on a laptop that's off overnight.)
 
 ## graphify
 
