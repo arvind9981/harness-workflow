@@ -94,4 +94,10 @@ done
 
 # 5) Repair any link/index inconsistencies left by the wing wipe.
 "$MP" repair >/dev/null 2>&1 || true
+
+# 6) On full success, reset the SessionStart hook's staleness stamp so it stops nudging.
+if [ "$rc" -eq 0 ]; then
+  mkdir -p "$HOME/.mempalace/hook_state"
+  date +%s > "$HOME/.mempalace/hook_state/last-reseed"
+fi
 exit "$rc"
