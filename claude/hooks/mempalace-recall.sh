@@ -21,8 +21,10 @@ prompt="$(cat | jq -r '.prompt // .user_prompt // empty' 2>/dev/null)"
 
 # Tunables (env-overridable)
 MIN_SIM="${MEMPALACE_RECALL_MIN_SIM:-0.45}"        # drop hits weaker than this cosine sim
-MAX_PER_SRC="${MEMPALACE_RECALL_MAX_PER_SRC:-2}"   # cap chunks from one source file
-MAX_HITS="${MEMPALACE_RECALL_MAX_HITS:-5}"         # final number of drawers injected
+                                                   # (kept at 0.45: useful hits cluster 0.45-0.47;
+                                                   #  a higher floor cuts signal, not just noise)
+MAX_PER_SRC="${MEMPALACE_RECALL_MAX_PER_SRC:-1}"   # cap chunks from one source file (1 = max diversity)
+MAX_HITS="${MEMPALACE_RECALL_MAX_HITS:-3}"         # final number of drawers injected (top-ranked only)
 CANDIDATES="${MEMPALACE_RECALL_CANDIDATES:-12}"    # over-fetch, then filter down
 
 # timeout(1) is GNU coreutils — absent on stock macOS. Use it when present,
@@ -111,7 +113,7 @@ PY
 ctx="$(printf '%s' "$raw" | MIN_SIM="$MIN_SIM" MAX_PER_SRC="$MAX_PER_SRC" MAX_HITS="$MAX_HITS" python3 -c "$FILTER")"
 
 [ -n "$ctx" ] || exit 0
-ctx="$(printf '%s' "$ctx" | head -c 4000)"
+ctx="$(printf '%s' "$ctx" | head -c 2500)"
 
 jq -cn --arg c "$ctx" \
   '{hookSpecificOutput:{hookEventName:"UserPromptSubmit",additionalContext:("Relevant memory (mempalace verbatim recall):\n"+$c)}}'
