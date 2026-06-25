@@ -91,6 +91,10 @@ for REPO_DIR in "$@"; do
     REPORT="graphify-out/GRAPH_REPORT.md"
 
     # 1) Refresh the AST graph (free, no API). Continue with existing report on failure.
+    # NOTE: community *naming* is deliberately NOT done here. `graphify label` needs
+    # Anthropic auth that only exists inside a live Claude session (headroom returns
+    # 401 standalone), so it cannot run out-of-session. The complete (named) map is
+    # refreshed in-session via graphify-complete-map.sh + the in-process MCP mine tool.
     if command -v graphify >/dev/null 2>&1; then
       graphify update . >/dev/null 2>&1 || echo "graphify-reseed: 'graphify update' failed in '$REPO_DIR' (using existing report)"
     fi

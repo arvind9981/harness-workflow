@@ -42,8 +42,8 @@ used — reach for the right tool without being asked:
 - A `UserPromptSubmit` hook surfaces relevant verbatim drawers each turn. When
   those hits are relevant, use them — but verify they still hold before relying on
   them; they reflect what was true when captured.
-- Memory captures automatically (mempalace `Stop`/`PreCompact` hooks) — so a
-  finding already lands in mempalace by default. **Don't reflexively write a
+- Memory captures automatically (mempalace `SessionEnd` catchup-rebuild hook) — so
+  a finding already lands in mempalace by default. **Don't reflexively write a
   `.md` for every finding.**
 - **Two memory tiers — choose deliberately:**
   - **File-based `memory/*.md` + `MEMORY.md`** loads into context *every* session,
@@ -62,16 +62,35 @@ used — reach for the right tool without being asked:
 - **Graphify auto-syncs into mempalace (session-triggered, wipe-and-replace).** A
   PostToolUse hook (`graphify-autoupdate.sh`) runs `graphify update .` on every code
   change to keep `GRAPH_REPORT.md` fresh; a throttled SessionStart hook
-  (`graphify-reseed-session.sh`, at most once per ~12h) then NUDGES the agent to
-  re-mine that report into the `graphify_<repo>` wing — so structural recall mirrors
-  the current graph with no manual curation. The refresh goes through the **in-process
-  MCP `mine` tool** (the only safe in-session writer): a separate CLI `mempalace mine`
-  running alongside a live MCP server writes the shared chroma DB concurrently and
+  (`graphify-reseed-session.sh`, at most once per ~12h) then NUDGES the agent to run
+  `~/.local/bin/graphify-sync.sh` (reads `graphify-repos.conf`) — which refreshes each
+  repo's AST and re-labels+stages ONLY repos whose code structure changed (node:edge
+  signature vs `hook_state/graph-sig-<leaf>`), printing `MINE wing=… source=…` lines
+  the agent mines and `SKIP` for unchanged repos (so big stable repos like xebia are
+  not re-labeled every window). Mining ALWAYS goes through the
+  **in-process MCP `mine` tool** (the only safe in-session writer): a separate CLI
+  `mempalace mine` alongside a live MCP server is two concurrent chroma writers and
   corrupts its FTS5 index — so **never run `mempalace mine` (or `graphify-reseed.sh`)
   from a hook or by hand while a session is live**. The standalone
-  `~/.local/bin/graphify-reseed.sh <repo>` still exists for out-of-session refreshes
-  and self-skips if an MCP server is up. (Replaces the old nightly 04:13 timer, which
-  never fired on a laptop that's off overnight.)
+  `~/.local/bin/graphify-reseed.sh <repo>` is for out-of-session AST refreshes and
+  self-skips if an MCP server is up.
+- **AST map vs COMPLETE (named) map — the distinction that decides recall quality.**
+  `graphify update` is AST-only: it leaves communities as unnamed `Community N`
+  placeholders AND resets existing names on re-cluster. So the auto-sync above mines an
+  *unnamed* map unless it is labeled first. A complete map needs `graphify label`,
+  which names communities — with a trap: `graphify` is a shell FUNCTION that injects
+  `--backend claude-cli`, but **scripts, hooks, and `nohup` get the bare binary with NO
+  backend and silently keep placeholders** (exit 0, `Token cost: 0`). Any script/hook
+  that labels MUST pass it explicitly:
+  `GRAPHIFY_CLAUDE_CLI_MODEL=sonnet graphify label . --backend claude-cli`. Labeling
+  spawns the Claude CLI and needs a live session; it does NOT use headroom.
+- **Load a complete map (IN-session, opposite of the AST reseed):**
+  `~/.local/bin/graphify-complete-map.sh <repo>…` labels (verify-retries; refuses to
+  stage a placeholder report) + stages each report; the agent then mines each staged
+  report via the MCP `mine` tool. `~/.local/bin/reseed-verify.sh <repo>…` drives this
+  for several repos and emits `MINE wing=… source=…` handoff lines + a
+  `STATUS: PASS_PENDING_MCP_MINE`. Cheap refresh between full rebuilds: `graphify
+  update` only re-extract is free; re-label only when code structure actually changed.
 
 ## graphify
 
@@ -81,4 +100,4 @@ Rules:
 - For codebase questions, first run `graphify query "<question>"` when graphify-out/graph.json exists. Use `graphify path "<A>" "<B>"` for relationships and `graphify explain "<concept>"` for focused concepts. These return a scoped subgraph, usually much smaller than GRAPH_REPORT.md or raw grep output.
 - If graphify-out/wiki/index.md exists, use it for broad navigation instead of raw source browsing.
 - Read graphify-out/GRAPH_REPORT.md only for broad architecture review or when query/path/explain do not surface enough context.
-- After modifying code, run `graphify update .` to keep the graph current (AST-only, no API cost).
+- After modifying code, run `graphify update .` to keep the graph current (AST-only, no API cost). NOTE: `update` leaves communities UNNAMED (`Community N`) and drops existing names; a complete named map needs `graphify label . --backend claude-cli` in-session (see "AST map vs COMPLETE map" under Memory & tooling defaults).
