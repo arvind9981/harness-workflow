@@ -131,7 +131,9 @@ Missing paths are skipped with a warning.
 Codex bootstrap is available through `codex/` and
 `tools/codex/install-codex.sh`. It installs the repo-maintained Codex
 instructions/hooks into `~/.codex`, preserves existing `config.toml` content, and
-upserts the shell environment Codex needs for `~/.local/bin` tools plus the
-headroom proxy URLs (`ANTHROPIC_BASE_URL` and `OPENAI_BASE_URL`). Regenerating
-`hooks.json` also preserves Supacode-managed hook entries. Run it with `./init.sh --codex` or directly with
-`./tools/codex/install-codex.sh`.
+upserts the shell environment Codex needs for `~/.local/bin` tools, a real
+terminal type (`TERM=xterm-256color`), and the headroom proxy URLs
+(`ANTHROPIC_BASE_URL` and `OPENAI_BASE_URL`). It also sets Codex's native
+`openai_base_url` to route model traffic through headroom.
+Regenerating `hooks.json` also preserves Supacode-managed hook entries. Run it
+with `./init.sh --codex` or directly with `./tools/codex/install-codex.sh`.

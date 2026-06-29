@@ -106,6 +106,10 @@ desired = {
     "ANTHROPIC_BASE_URL": "http://127.0.0.1:8787",
     "OPENAI_BASE_URL": "http://127.0.0.1:8787/v1",
     "PATH": codex_path,
+    "TERM": "xterm-256color",
+}
+desired_top = {
+    "openai_base_url": "http://127.0.0.1:8787/v1",
 }
 
 def section_of(line: str):
@@ -119,9 +123,15 @@ section = ""
 seen_policy = False
 seen_set = False
 inserted = False
+inserted_top = False
 
 def emit_desired(target: list[str]) -> None:
     for key, value in desired.items():
+        escaped = value.replace("\\", "\\\\").replace('"', '\\"')
+        target.append(f'{key} = "{escaped}"')
+
+def emit_desired_top(target: list[str]) -> None:
+    for key, value in desired_top.items():
         escaped = value.replace("\\", "\\\\").replace('"', '\\"')
         target.append(f'{key} = "{escaped}"')
 
@@ -130,6 +140,9 @@ while i < len(lines):
     line = lines[i]
     next_section = section_of(line)
     if next_section is not None:
+      if section == "" and not inserted_top:
+          emit_desired_top(out)
+          inserted_top = True
       if section == "shell_environment_policy.set" and not inserted:
           emit_desired(out)
           inserted = True
@@ -140,6 +153,12 @@ while i < len(lines):
       i += 1
       continue
 
+    if section == "":
+        stripped = line.lstrip()
+        if any(stripped.startswith(f"{key} ") or stripped.startswith(f"{key}=") for key in desired_top):
+            i += 1
+            continue
+
     if section == "shell_environment_policy.set":
         stripped = line.lstrip()
         if any(stripped.startswith(f"{key} ") or stripped.startswith(f"{key}=") for key in desired):
@@ -148,6 +167,10 @@ while i < len(lines):
 
     out.append(line)
     i += 1
+
+if section == "" and not inserted_top:
+    emit_desired_top(out)
+    inserted_top = True
 
 if section == "shell_environment_policy.set" and not inserted:
     emit_desired(out)
