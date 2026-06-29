@@ -104,6 +104,7 @@ codex_path = ":".join(parts)
 
 desired = {
     "ANTHROPIC_BASE_URL": "http://127.0.0.1:8787",
+    "OPENAI_BASE_URL": "http://127.0.0.1:8787/v1",
     "PATH": codex_path,
 }
 
