@@ -14,10 +14,11 @@ MP="${MEMPALACE_BIN:-$HOME/.local/bin/mempalace}"
 LABEL_ATTEMPTS="${GRAPHIFY_LABEL_ATTEMPTS:-2}"
 INCLUDE_LARGE=0
 DRY_RUN=0
+STOP_LIVE_MEMPALACE=0
 
 usage() {
   cat <<'USAGE'
-Usage: tools/graphify/refresh-structural-memory.sh [--dry-run] [--include-large]
+Usage: tools/graphify/refresh-structural-memory.sh [--dry-run] [--include-large] [--stop-live-mempalace]
 
 Discovers actual git repo roots under:
   ~/claude-workflow
@@ -29,9 +30,12 @@ selected repos, and mines confirmed MINE outputs into graphify_<repo> mempalace
 wings.
 
 Options:
-  --dry-run        Show discovered repos and planned sync set without writes.
-  --include-large  Include large label-heavy repos such as ACE-Agents.
-  -h, --help      Show this help.
+  --dry-run               Show discovered repos and planned sync set without writes.
+  --include-large         Include large label-heavy repos such as ACE-Agents.
+  --stop-live-mempalace   Stop live mempalace writer processes before CLI mining.
+                           Use only to drain pending mines when no MCP mine tool
+                           is available in the current session.
+  -h, --help              Show this help.
 USAGE
 }
 
@@ -39,6 +43,7 @@ while [ "$#" -gt 0 ]; do
   case "$1" in
     --dry-run) DRY_RUN=1 ;;
     --include-large) INCLUDE_LARGE=1 ;;
+    --stop-live-mempalace) STOP_LIVE_MEMPALACE=1 ;;
     -h|--help) usage; exit 0 ;;
     *)
       echo "refresh-structural-memory: unknown option: $1" >&2
@@ -73,15 +78,54 @@ is_large_repo() {
   esac
 }
 
-mempalace_writer_live() {
-  ps -axo command 2>/dev/null | awk '
-    /mempalace-mcp|mempalace mine/ {
-      if ($0 ~ /(^|\/)(awk|grep|rg)( |$)/) next
-      if ($0 ~ /refresh-structural-memory\.sh/) next
-      found = 1
+mempalace_writer_pids() {
+  ps -axo pid=,command= 2>/dev/null | awk '
+    {
+      pid = $1
+      cmd = $0
+      sub(/^[[:space:]]*[0-9]+[[:space:]]+/, "", cmd)
     }
-    END { exit found ? 0 : 1 }
+    cmd ~ /(^|\/)mempalace-mcp([[:space:]]|$)/ {
+      print pid
+      next
+    }
+    cmd ~ /(^|\/)mempalace[[:space:]]+mine([[:space:]]|$)/ {
+      print pid
+    }
   '
+}
+
+mempalace_writer_live() {
+  [ -n "$(mempalace_writer_pids)" ]
+}
+
+stop_mempalace_writers() {
+  local pids
+  local remaining
+  local i
+
+  pids="$(mempalace_writer_pids)"
+  [ -n "$pids" ] || return 0
+
+  echo "Stopping live mempalace writer processes:"
+  printf '%s\n' "$pids" | sed 's/^/  pid /'
+
+  if ! kill $pids 2>/dev/null; then
+    echo "refresh-structural-memory: failed to stop one or more mempalace writer processes" >&2
+    return 1
+  fi
+
+  i=0
+  while [ "$i" -lt 20 ]; do
+    remaining="$(mempalace_writer_pids)"
+    [ -z "$remaining" ] && return 0
+    sleep 0.5
+    i=$((i + 1))
+  done
+
+  echo "refresh-structural-memory: mempalace writer still live after TERM:" >&2
+  printf '%s\n' "$remaining" >&2
+  return 1
 }
 
 mine_line() {
@@ -262,15 +306,19 @@ if [ -n "$all_mine_lines" ]; then
   fi
 
   if mempalace_writer_live; then
-    echo "refresh-structural-memory: mempalace MCP/CLI writer is live; refusing CLI mine." >&2
-    echo "Pending MINE lines:"
-    printf '%s\n' "$all_mine_lines"
-    echo "Pending CLI mine commands:"
-    print_pending_commands <<EOF
+    if [ "$STOP_LIVE_MEMPALACE" -eq 1 ]; then
+      stop_mempalace_writers || { rm -f "$tmp"; exit 1; }
+    else
+      echo "refresh-structural-memory: mempalace MCP/CLI writer is live; refusing CLI mine." >&2
+      echo "Pending MINE lines:"
+      printf '%s\n' "$all_mine_lines"
+      echo "Pending CLI mine commands:"
+      print_pending_commands <<EOF
 $all_mine_lines
 EOF
-    rm -f "$tmp"
-    exit 1
+      rm -f "$tmp"
+      exit 1
+    fi
   fi
 
   while IFS= read -r line; do
