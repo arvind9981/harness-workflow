@@ -11,15 +11,19 @@
 # Self-guarding: no-op unless a graph already exists (never builds from scratch),
 # single-flight via pgrep, and detached so the edit returns immediately.
 [ -f graphify-out/graph.json ] || exit 0
-command -v graphify >/dev/null 2>&1 || exit 0
+GRAPHIFY="${GRAPHIFY_BIN:-$HOME/.local/bin/graphify}"
+if [ ! -x "$GRAPHIFY" ]; then
+  GRAPHIFY="$(command -v graphify 2>/dev/null || true)"
+fi
+[ -n "$GRAPHIFY" ] || exit 0
 
 # Single-flight: don't pile up overlapping updates.
 pgrep -f 'graphify update' >/dev/null 2>&1 && exit 0
 
 # Detach so the edit isn't blocked and the update survives hook exit.
 if command -v setsid >/dev/null 2>&1; then
-  setsid sh -c 'graphify update . >/dev/null 2>&1' >/dev/null 2>&1 &
+  GRAPHIFY="$GRAPHIFY" setsid sh -c '"$GRAPHIFY" update . >/dev/null 2>&1' >/dev/null 2>&1 &
 else
-  nohup sh -c 'graphify update . >/dev/null 2>&1' >/dev/null 2>&1 &
+  GRAPHIFY="$GRAPHIFY" nohup sh -c '"$GRAPHIFY" update . >/dev/null 2>&1' >/dev/null 2>&1 &
 fi
 exit 0

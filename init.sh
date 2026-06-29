@@ -3,12 +3,60 @@
 #
 #   git clone <this repo> && cd claude-workflow && ./init.sh
 #
+#   ./init.sh --help
+#   ./init.sh --codex --graphify-repo "$HOME/project-a"
+#
 # No secrets travel with this repo. After running, start `claude` and log in
 # interactively — Claude Code auto-installs the plugins declared in settings.json.
 #
 # Idempotent: every file it overwrites is backed up first (timestamped .bak-init).
 
 set -euo pipefail
+
+usage() {
+  cat <<'EOF'
+Usage: ./init.sh [options]
+
+Reproduce this Claude/Codex workflow on the current machine.
+
+Options:
+  --codex                 Also install the Codex workflow into ~/.codex.
+  --graphify-repo PATH    Add a repo to the graphify->mempalace reseed list.
+                          Repeat this option for multiple repos. Missing paths
+                          are skipped with a warning.
+  -h, --help              Show this help.
+
+Environment:
+  GRAPHIFY_EXTRA_REPOS    Colon-separated repo paths added to the reseed list.
+                          Example:
+                            GRAPHIFY_EXTRA_REPOS="$HOME/app:$HOME/api" ./init.sh --codex
+
+Default:
+  With no graphify repos configured, init tracks this claude-workflow repo only.
+EOF
+}
+
+INSTALL_CODEX=0
+GRAPHIFY_REPOS=()
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --codex) INSTALL_CODEX=1 ;;
+    --graphify-repo)
+      [ "$#" -ge 2 ] || { printf 'missing path after --graphify-repo\n' >&2; exit 1; }
+      GRAPHIFY_REPOS+=("$2")
+      shift
+      ;;
+    --graphify-repo=*)
+      GRAPHIFY_REPOS+=("${1#*=}")
+      ;;
+    -h|--help)
+      usage
+      exit 0
+      ;;
+    *) printf 'unknown argument: %s\n\n' "$1" >&2; usage >&2; exit 1 ;;
+  esac
+  shift
+done
 
 # ---------------------------------------------------------------------------
 REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -19,15 +67,18 @@ BIN_DIR="$HOME/.local/bin"
 UNIT_DIR="$HOME/.config/systemd/user"      # systemd user units (Linux)
 LAUNCH_DIR="$HOME/Library/LaunchAgents"    # launchd LaunchAgents (macOS)
 
-# Repos whose code graph is reseeded into mempalace (one graphify_<repo> wing each,
-# wipe-and-replace from graphify-out/GRAPH_REPORT.md), refreshed by the throttled
-# SessionStart hook. Edit this list to change what gets graphified. If left empty,
-# falls back to this workflow repo.
-GRAPHIFY_REPOS=(
-  "$HOME/xebia/ACE-Agents"
-  "$HOME/xebia/X-ACE-INFRA"
-  "$HOME/xebia/X-ACE-UI"
-)
+# Repos whose code graph is reseeded into mempalace (one graphify_<repo> wing
+# each, wipe-and-replace from graphify-out/GRAPH_REPORT.md), refreshed by the
+# throttled SessionStart hook. Keep the portable default empty so a fresh machine
+# tracks this workflow repo only. To add machine-specific repos without editing
+# this file, pass --graphify-repo repeatedly or set GRAPHIFY_EXTRA_REPOS.
+if [ -n "${GRAPHIFY_EXTRA_REPOS:-}" ]; then
+  OLD_IFS="$IFS"; IFS=:
+  # shellcheck disable=SC2206
+  extra_repos=($GRAPHIFY_EXTRA_REPOS)
+  IFS="$OLD_IFS"
+  GRAPHIFY_REPOS+=("${extra_repos[@]}")
+fi
 
 # OS-derived hint string shown to the user (the service manager differs per OS).
 case "$OS" in
@@ -219,6 +270,12 @@ if [ -d "$REPO_DIR/claude/hooks" ]; then
   done
 fi
 
+if [ "$INSTALL_CODEX" = 1 ]; then
+  step "Install Codex workflow"
+  bash "$REPO_DIR/tools/codex/install-codex.sh"
+  ok "Codex hooks/instructions installed"
+fi
+
 # ---------------------------------------------------------------------------
 step "Register graphify skill (Claude Code)"
 # Deploys ~/.claude/skills/graphify/ (the skill files can't be vendored). Runs AFTER
@@ -333,7 +390,17 @@ step "graphify→mempalace reseed (SessionStart hook)"
 # only safe in-session writer — and mines nothing itself. A competing CLI mine
 # alongside the live MCP server corrupts the palace's FTS5 index, so the hook never
 # runs one. See claude/hooks/graphify-reseed-session.sh.
-reseed_repos=("${GRAPHIFY_REPOS[@]:-$REPO_DIR}")
+reseed_repos=()
+for repo in "${GRAPHIFY_REPOS[@]}"; do
+  if [ -d "$repo" ]; then
+    reseed_repos+=("$repo")
+  else
+    warn "skipping missing graphify reseed repo: $repo"
+  fi
+done
+if [ "${#reseed_repos[@]}" -eq 0 ]; then
+  reseed_repos=("$REPO_DIR")
+fi
 # Persist the repo list for the hook to read.
 mkdir -p "$HOME/.mempalace"
 printf '%s\n' "${reseed_repos[@]}" > "$HOME/.mempalace/graphify-repos.conf"

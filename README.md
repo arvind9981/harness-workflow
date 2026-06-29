@@ -108,6 +108,30 @@ installed separately.
 `init.sh` is idempotent and timestamps a `.bak-init-*` copy of any file it
 overwrites. Re-running it is safe.
 
+## Extra graphify repos
+
+By default, `init.sh` tracks this workflow repo for graphify→mempalace reseed.
+Add machine-specific repos without editing the script:
+
+```bash
+./init.sh --graphify-repo "$HOME/project-a" --graphify-repo "$HOME/project-b"
+```
+
+For batch/shell-profile use, `GRAPHIFY_EXTRA_REPOS` accepts a colon-separated
+list:
+
+```bash
+GRAPHIFY_EXTRA_REPOS="$HOME/project-a:$HOME/project-b" ./init.sh --codex
+```
+
+Missing paths are skipped with a warning.
+
 ## Codex
 
-`codex/` is a placeholder — Codex bootstrap is not implemented yet.
+Codex bootstrap is available through `codex/` and
+`tools/codex/install-codex.sh`. It installs the repo-maintained Codex
+instructions/hooks into `~/.codex`, preserves existing `config.toml` content, and
+upserts the shell environment Codex needs for `~/.local/bin` tools plus the
+headroom proxy URL. Regenerating `hooks.json` also preserves Supacode-managed
+hook entries. Run it with `./init.sh --codex` or directly with
+`./tools/codex/install-codex.sh`.
