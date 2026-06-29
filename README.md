@@ -134,6 +134,5 @@ instructions/hooks into `~/.codex`, preserves existing `config.toml` content, an
 upserts the shell environment Codex needs for `~/.local/bin` tools, a real
 terminal type (`TERM=xterm-256color`), and the headroom proxy URLs
 (`ANTHROPIC_BASE_URL` and `OPENAI_BASE_URL`). It also sets Codex's native
-`openai_base_url` to route model traffic through headroom.
-Regenerating `hooks.json` also preserves Supacode-managed hook entries. Run it
-with `./init.sh --codex` or directly with `./tools/codex/install-codex.sh`.
+`openai_base_url` to route model traffic through headroom. Run it with
+`./init.sh --codex` or directly with `./tools/codex/install-codex.sh`.

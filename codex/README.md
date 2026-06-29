@@ -10,8 +10,7 @@ The Codex bootstrap mirrors the repo-maintained parts of the Claude workflow:
   environment values so `~/.local/bin` tools resolve inside Codex and terminal
   checks see `TERM=xterm-256color`. It also sets Codex's native
   `openai_base_url` so OpenAI-compatible model traffic routes through headroom
-  while leaving ChatGPT auth/backend routing untouched. Existing Supacode-managed
-  hook entries are preserved when regenerating `hooks.json`.
+  while leaving ChatGPT auth/backend routing untouched.
 
 Run it directly:
 

@@ -36,50 +36,8 @@ for hook in "$REPO_DIR"/claude/hooks/*.sh; do
   install -m 0755 "$hook" "$dest"
 done
 
-existing_hooks=""
-if [ -n "${CODEX_PRESERVE_HOOKS_FROM:-}" ] && [ -f "$CODEX_PRESERVE_HOOKS_FROM" ]; then
-  existing_hooks="$(mktemp)"
-  cp "$CODEX_PRESERVE_HOOKS_FROM" "$existing_hooks"
-elif [ -f "$CODEX_DIR/hooks.json" ]; then
-  existing_hooks="$(mktemp)"
-  cp "$CODEX_DIR/hooks.json" "$existing_hooks"
-fi
 backup "$CODEX_DIR/hooks.json"
 sed "s#__HOME__#$HOME#g" "$REPO_DIR/codex/hooks.json" > "$CODEX_DIR/hooks.json"
-
-if [ -n "$existing_hooks" ]; then
-  python3 - "$CODEX_DIR/hooks.json" "$existing_hooks" <<'PY'
-import json
-import sys
-from pathlib import Path
-
-target_path = Path(sys.argv[1])
-existing_path = Path(sys.argv[2])
-
-try:
-    target = json.loads(target_path.read_text(encoding="utf-8"))
-    existing = json.loads(existing_path.read_text(encoding="utf-8"))
-except Exception:
-    sys.exit(0)
-
-def managed(entry):
-    for hook in entry.get("hooks", []):
-        if "supacode-managed-hook" in str(hook.get("command", "")):
-            return True
-    return False
-
-target_hooks = target.setdefault("hooks", {})
-for event, entries in existing.get("hooks", {}).items():
-    if not isinstance(entries, list):
-        continue
-    keep = [entry for entry in entries if isinstance(entry, dict) and managed(entry)]
-    if keep:
-        target_hooks.setdefault(event, []).extend(keep)
-
-target_path.write_text(json.dumps(target, indent=2) + "\n", encoding="utf-8")
-PY
-  rm -f "$existing_hooks"
-fi
 
 backup "$CODEX_DIR/AGENTS.md"
 install -m 0644 "$REPO_DIR/codex/AGENTS.md" "$CODEX_DIR/AGENTS.md"
