@@ -153,7 +153,28 @@ mine_line() {
     return 1
   fi
 
+  ensure_mempalace_yaml "$source" "$wing" || return 1
+
   "$MP" mine "$source" --wing "$wing"
+}
+
+ensure_mempalace_yaml() {
+  local source="$1"
+  local wing="$2"
+  local config="$source/mempalace.yaml"
+
+  [ -f "$config" ] && return 0
+
+  cat > "$config" <<EOF
+wing: "$wing"
+rooms:
+  - name: general
+    description: Graphify structural report
+    keywords:
+      - graphify
+      - structural
+      - codebase
+EOF
 }
 
 print_pending_commands() {
