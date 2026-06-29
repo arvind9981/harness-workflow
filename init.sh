@@ -20,7 +20,8 @@ Usage: ./init.sh [options]
 Reproduce this Claude/Codex workflow on the current machine.
 
 Options:
-  --codex                 Also install the Codex workflow into ~/.codex.
+  --codex                 Install the Codex workflow into ~/.codex (default; kept for compatibility).
+  --no-codex              Skip Codex workflow install.
   --graphify-repo PATH    Add a repo to the graphify->mempalace reseed list.
                           Repeat this option for multiple repos. Missing paths
                           are skipped with a warning.
@@ -29,18 +30,19 @@ Options:
 Environment:
   GRAPHIFY_EXTRA_REPOS    Colon-separated repo paths added to the reseed list.
                           Example:
-                            GRAPHIFY_EXTRA_REPOS="$HOME/app:$HOME/api" ./init.sh --codex
+GRAPHIFY_EXTRA_REPOS="$HOME/app:$HOME/api" ./init.sh
 
 Default:
   With no graphify repos configured, init tracks this claude-workflow repo only.
 EOF
 }
 
-INSTALL_CODEX=0
+INSTALL_CODEX=1
 GRAPHIFY_REPOS=()
 while [ "$#" -gt 0 ]; do
   case "$1" in
-    --codex) INSTALL_CODEX=1 ;;
+--codex) INSTALL_CODEX=1 ;;
+--no-codex) INSTALL_CODEX=0 ;;
     --graphify-repo)
       [ "$#" -ge 2 ] || { printf 'missing path after --graphify-repo\n' >&2; exit 1; }
       GRAPHIFY_REPOS+=("$2")

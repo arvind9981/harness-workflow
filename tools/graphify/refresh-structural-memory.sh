@@ -2,7 +2,8 @@
 # Refresh graphify-backed mempalace structural memory.
 #
 # Discovers actual git repos, writes graphify-repos.conf, runs graphify-sync.sh,
-# and mines confirmed MINE outputs only when it is safe to write to mempalace.
+# mines confirmed MINE outputs only when it is safe to write to mempalace, and
+# can prune stale graphify-out directories outside the discovered repo roots.
 
 set -uo pipefail
 
@@ -15,10 +16,12 @@ LABEL_ATTEMPTS="${GRAPHIFY_LABEL_ATTEMPTS:-2}"
 INCLUDE_LARGE=0
 DRY_RUN=0
 STOP_LIVE_MEMPALACE=0
+PRUNE_STALE=0
+PRUNE_WORKTREES=0
 
 usage() {
   cat <<'USAGE'
-Usage: tools/graphify/refresh-structural-memory.sh [--dry-run] [--include-large] [--stop-live-mempalace]
+Usage: tools/graphify/refresh-structural-memory.sh [options]
 
 Discovers actual git repo roots under:
   ~/claude-workflow
@@ -30,11 +33,14 @@ selected repos, and mines confirmed MINE outputs into graphify_<repo> mempalace
 wings.
 
 Options:
-  --dry-run               Show discovered repos and planned sync set without writes.
+  --dry-run               Show discovered repos and planned actions without writes.
   --include-large         Include large label-heavy repos such as ACE-Agents.
   --stop-live-mempalace   Stop live mempalace writer processes before CLI mining.
                            Use only to drain pending mines when no MCP mine tool
                            is available in the current session.
+  --prune-stale           Remove graphify-out dirs not under discovered repo roots.
+  --prune-worktrees       With --prune-stale, also prune graphify-out dirs inside
+                           git worktrees that are not discovered repo roots.
   -h, --help              Show this help.
 USAGE
 }
@@ -44,6 +50,8 @@ while [ "$#" -gt 0 ]; do
     --dry-run) DRY_RUN=1 ;;
     --include-large) INCLUDE_LARGE=1 ;;
     --stop-live-mempalace) STOP_LIVE_MEMPALACE=1 ;;
+    --prune-stale) PRUNE_STALE=1 ;;
+    --prune-worktrees) PRUNE_WORKTREES=1 ;;
     -h|--help) usage; exit 0 ;;
     *)
       echo "refresh-structural-memory: unknown option: $1" >&2
@@ -76,6 +84,81 @@ is_large_repo() {
     ACE-Agents) return 0 ;;
     *) return 1 ;;
   esac
+}
+
+repo_list_contains() {
+  local needle="$1"
+  local line
+
+  while IFS= read -r line; do
+    [ "$line" = "$needle" ] && return 0
+  done <<EOF
+$repos
+EOF
+
+  return 1
+}
+
+discover_graphify_dirs() {
+  for root in "$HOME/claude-workflow" "$HOME/xebia" "$HOME/complion"; do
+    [ -d "$root" ] || continue
+    find "$root" -maxdepth 4 -type d -name graphify-out 2>/dev/null
+  done | sort
+}
+
+prune_stale_graphify_dirs() {
+  local dirs="$1"
+  local dir
+  local owner
+  local git_root
+  local stale=""
+  local skipped_worktrees=""
+
+  while IFS= read -r dir; do
+    [ -n "$dir" ] || continue
+    owner="${dir%/graphify-out}"
+
+    if repo_list_contains "$owner"; then
+      continue
+    fi
+
+    git_root="$(repo_root_of "$owner")"
+    if [ -n "$git_root" ] && [ "$git_root" = "$owner" ] && [ "$PRUNE_WORKTREES" -eq 0 ]; then
+      skipped_worktrees="${skipped_worktrees}${dir}
+"
+      continue
+    fi
+
+    stale="${stale}${dir}
+"
+  done <<EOF
+$dirs
+EOF
+
+  if [ -n "$skipped_worktrees" ]; then
+    echo "Stale worktree graphify-out dirs skipped:"
+    printf '%s\n' "$skipped_worktrees" | sed '/^$/d; s/^/  /'
+  fi
+
+  if [ -z "$stale" ]; then
+    echo "No stale graphify-out dirs to prune."
+    return 0
+  fi
+
+  if [ "$DRY_RUN" -eq 1 ]; then
+    echo "Would prune stale graphify-out dirs:"
+    printf '%s\n' "$stale" | sed '/^$/d; s/^/  /'
+    return 0
+  fi
+
+  echo "Pruning stale graphify-out dirs:"
+  while IFS= read -r dir; do
+    [ -n "$dir" ] || continue
+    echo "  $dir"
+    rm -rf "$dir" || return 1
+  done <<EOF
+$stale
+EOF
 }
 
 mempalace_writer_pids() {
@@ -128,6 +211,25 @@ stop_mempalace_writers() {
   return 1
 }
 
+ensure_mempalace_yaml() {
+  local source="$1"
+  local wing="$2"
+  local config="$source/mempalace.yaml"
+
+  [ -f "$config" ] && return 0
+
+  cat > "$config" <<EOF
+wing: "$wing"
+rooms:
+  - name: general
+    description: Graphify structural report
+    keywords:
+      - graphify
+      - structural
+      - codebase
+EOF
+}
+
 mine_line() {
   # Expected: MINE wing=<wing> source=<source> ...
   local line="$1"
@@ -154,27 +256,7 @@ mine_line() {
   fi
 
   ensure_mempalace_yaml "$source" "$wing" || return 1
-
   "$MP" mine "$source" --wing "$wing"
-}
-
-ensure_mempalace_yaml() {
-  local source="$1"
-  local wing="$2"
-  local config="$source/mempalace.yaml"
-
-  [ -f "$config" ] && return 0
-
-  cat > "$config" <<EOF
-wing: "$wing"
-rooms:
-  - name: general
-    description: Graphify structural report
-    keywords:
-      - graphify
-      - structural
-      - codebase
-EOF
 }
 
 print_pending_commands() {
@@ -232,6 +314,10 @@ printf '%s\n' "$repos" | sed 's/^/  /'
 if [ "$INCLUDE_LARGE" -eq 0 ] && [ -n "$large_repos" ]; then
   echo "Large repos skipped by default:"
   printf '%s\n' "$large_repos" | sed '/^$/d; s/^/  /'
+fi
+
+if [ "$PRUNE_STALE" -eq 1 ]; then
+  prune_stale_graphify_dirs "$(discover_graphify_dirs)" || exit 1
 fi
 
 sync_repos="$normal_repos"
