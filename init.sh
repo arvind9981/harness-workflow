@@ -22,6 +22,8 @@ Reproduce this Claude/Codex workflow on the current machine.
 Options:
   --codex                 Install the Codex workflow into ~/.codex (default; kept for compatibility).
   --no-codex              Skip Codex workflow install.
+  --desktop               Wire the mempalace MCP server into Claude Desktop (macOS; default).
+  --no-desktop            Skip Claude Desktop MCP wiring.
   --graphify-repo PATH    Add a repo to the graphify->mempalace reseed list.
                           Repeat this option for multiple repos. Missing paths
                           are skipped with a warning.
@@ -38,11 +40,14 @@ EOF
 }
 
 INSTALL_CODEX=1
+INSTALL_DESKTOP=1
 GRAPHIFY_REPOS=()
 while [ "$#" -gt 0 ]; do
   case "$1" in
 --codex) INSTALL_CODEX=1 ;;
 --no-codex) INSTALL_CODEX=0 ;;
+--desktop) INSTALL_DESKTOP=1 ;;
+--no-desktop) INSTALL_DESKTOP=0 ;;
     --graphify-repo)
       [ "$#" -ge 2 ] || { printf 'missing path after --graphify-repo\n' >&2; exit 1; }
       GRAPHIFY_REPOS+=("$2")
@@ -276,6 +281,54 @@ if [ "$INSTALL_CODEX" = 1 ]; then
   step "Install Codex workflow"
   bash "$REPO_DIR/tools/codex/install-codex.sh"
   ok "Codex hooks/instructions installed"
+fi
+
+# ---------------------------------------------------------------------------
+step "Wire Claude Desktop MCP (mempalace)"
+# Claude Desktop is a SEPARATE app from Claude Code: it has no hooks / CLAUDE.md /
+# skills engine — only MCP servers. So the sole piece of this workflow that ports to
+# Desktop is the mempalace memory server. We MERGE it into Desktop's config (macOS
+# path) with jq, leaving every other server (e.g. MCP_DOCKER) and preference key
+# untouched. Hooks/CLAUDE.md cannot be wired here — the app has no engine for them.
+if [ "$INSTALL_DESKTOP" = 1 ]; then
+  if [ "$OS" = "Darwin" ]; then
+    DESKTOP_APP_DIR="$HOME/Library/Application Support/Claude"
+    DESKTOP_CFG="$DESKTOP_APP_DIR/claude_desktop_config.json"
+    MP_BIN="$(command -v mempalace-mcp || true)"
+    [ -n "$MP_BIN" ] || MP_BIN="$BIN_DIR/mempalace-mcp"
+    PALACE_DIR="$HOME/.mempalace/palace"
+    if [ ! -d "$DESKTOP_APP_DIR" ]; then
+      info "Claude Desktop not installed (no $DESKTOP_APP_DIR) — skipping Desktop MCP wiring"
+    elif [ ! -x "$MP_BIN" ]; then
+      warn "mempalace-mcp not found at $MP_BIN — skipping Desktop MCP wiring"
+    else
+      # Absolute binary path is REQUIRED: Desktop is a GUI app with a minimal PATH and
+      # cannot resolve a bare 'mempalace-mcp' (Claude Code can). --palace pins Desktop to
+      # the SAME shared palace as Claude Code.
+      [ -s "$DESKTOP_CFG" ] || printf '{}\n' > "$DESKTOP_CFG"
+      merged="$(mktemp)"
+      if jq --arg cmd "$MP_BIN" --arg palace "$PALACE_DIR" \
+            '.mcpServers = ((.mcpServers // {}) + {mempalace: {command: $cmd, args: ["--palace", $palace]}})' \
+            "$DESKTOP_CFG" > "$merged" 2>/dev/null && [ -s "$merged" ]; then
+        if cmp -s "$merged" "$DESKTOP_CFG"; then
+          ok "Claude Desktop MCP already wired (mempalace -> $MP_BIN)"
+          rm -f "$merged"
+        else
+          backup "$DESKTOP_CFG"
+          mv "$merged" "$DESKTOP_CFG"
+          ok "Claude Desktop MCP wired (mempalace -> $MP_BIN); other servers preserved"
+          info "fully quit + reopen Claude Desktop (Cmd-Q) so it reloads the MCP config"
+        fi
+      else
+        rm -f "$merged"
+        warn "$DESKTOP_CFG is not valid JSON — left unchanged"
+      fi
+    fi
+  else
+    info "skipped Claude Desktop MCP wiring (macOS-only; OS=$OS)"
+  fi
+else
+  info "skipped Claude Desktop MCP wiring (--no-desktop)"
 fi
 
 # ---------------------------------------------------------------------------
