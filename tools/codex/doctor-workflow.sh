@@ -91,7 +91,8 @@ check_codex_config() {
     return
   fi
 
-  if grep -q 'openai_base_url *= *"http://127\.0\.0\.1:8787/v1"' "$config"; then
+  # Accept single- or double-quoted (or unquoted) TOML values — Codex writes single quotes.
+  if grep -Eq "openai_base_url[[:space:]]*=[[:space:]]*['\"]?http://127\.0\.0\.1:8787/v1['\"]?" "$config"; then
     pass "Codex native openai_base_url routes through headroom"
   else
     fail "Codex native openai_base_url is not routed through headroom"
