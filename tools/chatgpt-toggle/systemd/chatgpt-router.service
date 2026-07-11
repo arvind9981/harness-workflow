@@ -10,7 +10,7 @@ Environment=HEADROOM_URL=http://127.0.0.1:8787
 Environment=BRIDGE_URL=http://127.0.0.1:18765
 Environment=SMALL_FAST_MODEL=claude-sonnet-5
 Environment=CODEX_MODEL=gpt-5.5
-ExecStart=%h/.local/bin/uv run %h/claude-workflow/tools/chatgpt-toggle/router.py
+ExecStart=%h/.local/bin/uv run %h/.local/share/chatgpt-toggle/router.py
 Restart=on-failure
 RestartSec=3
 
