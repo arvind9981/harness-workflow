@@ -24,9 +24,9 @@ leaf="$(basename "$cwd")"
 wing="$(printf '%s' "$leaf" | tr '[:upper:] -' '[:lower:]__')"
 
 # Wing-scoped wake-up; fall back to unscoped if the wing has nothing.
-raw="$(_to 8 "$MEMPALACE" wake-up --wing "$wing" < /dev/null 2>/dev/null | sed -r 's/\x1B\[[0-9;]*[mK]//g')"
+raw="$(_to 8 "$MEMPALACE" wake-up --wing "$wing" < /dev/null 2>/dev/null | sed -E $'s/\x1b\\[[0-9;]*[mK]//g')"
 printf '%s' "$raw" | grep -q '[A-Za-z]' || \
-  raw="$(_to 3 "$MEMPALACE" wake-up < /dev/null 2>/dev/null | sed -r 's/\x1B\[[0-9;]*[mK]//g')"
+  raw="$(_to 3 "$MEMPALACE" wake-up < /dev/null 2>/dev/null | sed -E $'s/\x1b\\[[0-9;]*[mK]//g')"
 [ -n "$raw" ] || exit 0
 
 # Strip transcript/tool/command noise that pollutes the recency-scored L1 story:

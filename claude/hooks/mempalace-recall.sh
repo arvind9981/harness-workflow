@@ -37,7 +37,7 @@ _to() { _s="$1"; shift; if command -v timeout >/dev/null 2>&1; then timeout "$_s
 # Cap query length; run the local palace search (semantic + bm25), strip ANSI.
 q="$(printf '%s' "$prompt" | head -c 400)"
 raw="$(_to "$SEARCH_TIMEOUT_S" "$MEMPALACE" search "$q" --results "$CANDIDATES" < /dev/null 2>/dev/null \
-  | sed -r 's/\x1B\[[0-9;]*[mK]//g')"
+  | sed -E $'s/\x1b\\[[0-9;]*[mK]//g')"
 
 # Only proceed when there were real hits (search prints "Source:" per result).
 printf '%s' "$raw" | grep -q 'Source:' || exit 0
