@@ -100,9 +100,17 @@ warn() { printf '  %s!%s %s\n' "$c_yel" "$c_rst" "$1"; }
 die()  { printf '  %s✗%s %s\n' "$c_red" "$c_rst" "$1" >&2; exit 1; }
 step() { printf '\n%s== %s ==%s\n' "$c_grn" "$1" "$c_rst"; }
 
-backup() {  # backup <path> — copy aside once per run if it exists (first backup wins)
+backup() {  # backup <path> — copy aside once per run if it exists (first backup wins),
+            # then keep only the newest $KEEP_BACKUPS snapshots of that path (prune old runs)
   [ -e "$1.bak-init-$STAMP" ] && return 0   # already backed up this run; keep the true pre-run snapshot
-  [ -e "$1" ] && cp -p "$1" "$1.bak-init-$STAMP" && info "backed up $(basename "$1") -> $(basename "$1").bak-init-$STAMP"
+  [ -e "$1" ] || return 0
+  cp -p "$1" "$1.bak-init-$STAMP" && info "backed up $(basename "$1") -> $(basename "$1").bak-init-$STAMP"
+  # Prune: the bak-init-YYYYMMDD-HHMMSS suffix sorts chronologically, so keep the newest
+  # $KEEP_BACKUPS and delete the rest for this path. Never let a prune failure abort init.
+  local keep="${KEEP_BACKUPS:-5}" dir base old
+  dir="$(dirname "$1")"; base="$(basename "$1")"
+  find "$dir" -maxdepth 1 -name "$base.bak-init-*" 2>/dev/null | sort -r | tail -n +"$((keep + 1))" \
+    | while IFS= read -r old; do rm -f "$old"; done || true
   return 0
 }
 
