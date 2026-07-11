@@ -17,6 +17,21 @@ backup() {
   return 0
 }
 
+CHANGED=0
+# Install src -> dest only when the content differs (backup-first). Skipping identical
+# writes keeps file mtimes/hashes stable, so an unchanged redeploy does NOT re-trigger
+# Codex's per-hook trust review. A genuine hook change still writes (and rightly needs
+# re-trust). cmp -s is portable to BSD/macOS.
+install_if_changed() {  # <src> <dest> <mode>
+  local src="$1" dest="$2" mode="$3"
+  if [ -f "$dest" ] && cmp -s "$src" "$dest"; then
+    return 0
+  fi
+  backup "$dest"
+  install -m "$mode" "$src" "$dest"
+  CHANGED=$((CHANGED + 1))
+}
+
 require() {
   command -v "$1" >/dev/null 2>&1 || {
     printf 'install-codex: missing required command: %s\n' "$1" >&2
@@ -31,22 +46,21 @@ mkdir -p "$CODEX_DIR/hooks"
 
 for hook in "$REPO_DIR"/claude/hooks/*.sh; do
   [ -e "$hook" ] || continue
-  dest="$CODEX_DIR/hooks/$(basename "$hook")"
-  backup "$dest"
-  install -m 0755 "$hook" "$dest"
+  install_if_changed "$hook" "$CODEX_DIR/hooks/$(basename "$hook")" 0755
 done
 
-backup "$CODEX_DIR/hooks.json"
-sed "s#__HOME__#$HOME#g" "$REPO_DIR/codex/hooks.json" > "$CODEX_DIR/hooks.json"
+# Render __HOME__ first, then write hooks.json only if the result differs.
+rendered="$(mktemp "${TMPDIR:-/tmp}/codex-hooksjson.XXXXXX")"
+sed "s#__HOME__#$HOME#g" "$REPO_DIR/codex/hooks.json" > "$rendered"
+install_if_changed "$rendered" "$CODEX_DIR/hooks.json" 0644
+rm -f "$rendered"
 
-backup "$CODEX_DIR/AGENTS.md"
-install -m 0644 "$REPO_DIR/codex/AGENTS.md" "$CODEX_DIR/AGENTS.md"
+install_if_changed "$REPO_DIR/codex/AGENTS.md" "$CODEX_DIR/AGENTS.md" 0644
 
 config="$CODEX_DIR/config.toml"
 touch "$config"
-backup "$config"
 
-CODEX_BIN_DIR="$BIN_DIR" CODEX_EXISTING_PATH="${PATH:-}" python3 - "$config" <<'PY'
+CODEX_BIN_DIR="$BIN_DIR" CODEX_EXISTING_PATH="${PATH:-}" CODEX_BACKUP_SUFFIX=".bak-codex-$STAMP" python3 - "$config" <<'PY'
 import os
 import sys
 from pathlib import Path
@@ -145,7 +159,12 @@ if not seen_set:
     out.append("[shell_environment_policy.set]")
     emit_desired(out)
 
-path.write_text("\n".join(out).rstrip() + "\n", encoding="utf-8")
+new_text = "\n".join(out).rstrip() + "\n"
+if new_text != text:
+    suffix = os.environ.get("CODEX_BACKUP_SUFFIX", "")
+    if suffix and text:
+        Path(str(path) + suffix).write_text(text, encoding="utf-8")
+    path.write_text(new_text, encoding="utf-8")
 PY
 
-printf 'Codex workflow installed into %s\n' "$CODEX_DIR"
+printf 'Codex workflow installed into %s (%s hook/instruction file(s) updated)\n' "$CODEX_DIR" "$CHANGED"
