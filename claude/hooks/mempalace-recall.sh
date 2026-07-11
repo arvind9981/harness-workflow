@@ -26,6 +26,9 @@ MIN_SIM="${MEMPALACE_RECALL_MIN_SIM:-0.45}"        # drop hits weaker than this 
 MAX_PER_SRC="${MEMPALACE_RECALL_MAX_PER_SRC:-1}"   # cap chunks from one source file (1 = max diversity)
 MAX_HITS="${MEMPALACE_RECALL_MAX_HITS:-3}"         # final number of drawers injected (top-ranked only)
 CANDIDATES="${MEMPALACE_RECALL_CANDIDATES:-12}"    # over-fetch, then filter down
+SEARCH_TIMEOUT_S="${MEMPALACE_RECALL_TIMEOUT_S:-8}" # per-call palace search timeout (cold-starts
+                                                   #  python/chromadb; keep >= ~5-6s to avoid killing
+                                                   #  a legit cold search)
 
 # timeout(1) is GNU coreutils — absent on stock macOS. Use it when present,
 # otherwise degrade to running the command without a time limit.
@@ -33,7 +36,7 @@ _to() { _s="$1"; shift; if command -v timeout >/dev/null 2>&1; then timeout "$_s
 
 # Cap query length; run the local palace search (semantic + bm25), strip ANSI.
 q="$(printf '%s' "$prompt" | head -c 400)"
-raw="$(_to 8 "$MEMPALACE" search "$q" --results "$CANDIDATES" < /dev/null 2>/dev/null \
+raw="$(_to "$SEARCH_TIMEOUT_S" "$MEMPALACE" search "$q" --results "$CANDIDATES" < /dev/null 2>/dev/null \
   | sed -r 's/\x1B\[[0-9;]*[mK]//g')"
 
 # Only proceed when there were real hits (search prints "Source:" per result).

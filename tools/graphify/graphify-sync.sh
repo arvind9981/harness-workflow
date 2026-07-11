@@ -47,6 +47,7 @@ sig_of() {
   [ -n "$n" ] && [ -n "$e" ] && echo "$n:$e"
 }
 
+fails=0
 for d in "${REPOS[@]}"; do
   d="${d/#\~/$HOME}"
   [ -d "$d" ] || { echo "SKIP $(basename "$d") (no dir)"; continue; }
@@ -77,5 +78,13 @@ for d in "${REPOS[@]}"; do
     printf '%s' "$cur" > "$sigf"
   else
     echo "FAIL $leaf (label/stage did not converge — not mineable; sig unchanged)"
+    fails=$((fails + 1))
   fi
 done
+
+# Conf-driven (SessionStart-nudge) run with no failures: advance the reseed staleness
+# stamp ourselves, so the nudge doesn't re-fire forever waiting on a by-hand write.
+# (Explicit-repo runs and any FAIL leave the stamp untouched.)
+if [ "$#" -eq 0 ] && [ "$fails" -eq 0 ]; then
+  date +%s > "$STATE/last-reseed" 2>/dev/null || true
+fi

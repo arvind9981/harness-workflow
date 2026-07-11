@@ -38,7 +38,8 @@ reach for it without being asked.
   MCP search / traverse / kg_query tools) instead of reconstructing. A per-turn
   `UserPromptSubmit` hook also surfaces relevant drawers — use them when relevant, but
   verify they still hold before relying on them (they reflect capture-time truth).
-- **Memory auto-captures** (SessionEnd hook) — a finding lands in mempalace by default.
+- **Memory auto-captures** into mempalace by default (via mempalace's own session
+  hooks; the repo's SessionEnd hook is a separate vector-index rebuild, not capture).
   Don't reflexively write a `.md` for every finding.
 - **Two memory tiers — choose deliberately:**
   - `memory/*.md` + `MEMORY.md` load *every* session (permanent context cost). Reserve for

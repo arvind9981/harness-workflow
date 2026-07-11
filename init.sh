@@ -100,7 +100,8 @@ warn() { printf '  %s!%s %s\n' "$c_yel" "$c_rst" "$1"; }
 die()  { printf '  %s✗%s %s\n' "$c_red" "$c_rst" "$1" >&2; exit 1; }
 step() { printf '\n%s== %s ==%s\n' "$c_grn" "$1" "$c_rst"; }
 
-backup() {  # backup <path> — copy aside if it exists and differs from what we'll write
+backup() {  # backup <path> — copy aside once per run if it exists (first backup wins)
+  [ -e "$1.bak-init-$STAMP" ] && return 0   # already backed up this run; keep the true pre-run snapshot
   [ -e "$1" ] && cp -p "$1" "$1.bak-init-$STAMP" && info "backed up $(basename "$1") -> $(basename "$1").bak-init-$STAMP"
   return 0
 }
@@ -190,7 +191,7 @@ step "Install graphify (code knowledge graph)"
 # PyPI package is 'graphifyy' (double-y); the CLI is 'graphify'. Builds extract via
 # Claude subagents through the headroom proxy (no ollama, nothing to pin).
 uv tool install --upgrade graphifyy >/dev/null 2>&1 && ok "graphifyy installed/upgraded" \
-  || die "uv tool install graphifyy failed"
+  || warn "uv tool install graphifyy failed — graphify features will be skipped"
 command -v graphify >/dev/null 2>&1 && ok "graphify CLI present" \
   || warn "graphify missing — skill registration will be skipped"
 

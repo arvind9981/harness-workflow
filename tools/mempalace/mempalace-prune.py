@@ -17,6 +17,7 @@ import re
 import sys
 import json
 import datetime
+import subprocess
 
 PALACE = os.path.expanduser(os.environ.get("MEMPALACE_PALACE", "~/.mempalace/palace"))
 COLLECTION = "mempalace_drawers"
@@ -40,6 +41,17 @@ def _log(msg: str) -> None:
         f.write(line + "\n")
 
 
+def _mcp_live() -> bool:
+    # A live mempalace-mcp server is a concurrent chromadb writer on the shared store;
+    # opening it here too corrupts the FTS5 index. Mirror the guard the other writers
+    # use (graphify-reseed.sh, mempalace-catchup-rebuild-sessionend.sh: pgrep -f mempalace-mcp).
+    try:
+        return subprocess.run(["pgrep", "-f", "mempalace-mcp"],
+                              capture_output=True).returncode == 0
+    except Exception:
+        return False
+
+
 def _is_junk(doc: str, source: str) -> bool:
     if source and _EPHEMERAL.search(source):
         return True
@@ -60,6 +72,9 @@ def main() -> int:
     except ImportError:
         _log("ERROR: chromadb not importable — run with mempalace's interpreter")
         return 1
+    if _mcp_live():
+        _log("skip: mempalace-mcp live (avoid concurrent chroma writer)")
+        return 0
     try:
         col = chromadb.PersistentClient(path=PALACE).get_collection(COLLECTION)
     except Exception as e:
@@ -77,6 +92,9 @@ def main() -> int:
         return 0
     if DRY:
         _log(f"DRY-RUN: would delete {len(junk)}/{n} drawers")
+        return 0
+    if _mcp_live():
+        _log("abort: mempalace-mcp started mid-scan; not deleting")
         return 0
     for k in range(0, len(junk), 200):
         col.delete(ids=junk[k:k + 200])

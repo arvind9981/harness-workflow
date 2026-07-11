@@ -36,8 +36,6 @@
       "Bash(command -v pkgfile)",
       "Bash(command -v yay)",
       "Bash(cp ~/.claude/settings.local.json ~/.claude/settings.local.json.bak-claude)",
-      "Bash(curl -fsS --max-time 4 http://127.0.0.1:37700/health)",
-      "Bash(curl -fsS --max-time 4 http://127.0.0.1:4000/health/readiness)",
       "Bash(curl -s http://127.0.0.1:8787/health)",
       "Bash(curl -s --max-time 4 http://127.0.0.1:8787/health)",
       "Bash(curl -s --max-time 4 http://127.0.0.1:8787/metrics)",
