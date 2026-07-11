@@ -1,0 +1,18 @@
+[Unit]
+Description=ChatGPT toggle front-router (ANTHROPIC_BASE_URL -> headroom | codex bridge)
+After=network-online.target chatgpt-bridge.service headroom-proxy.service
+Wants=network-online.target chatgpt-bridge.service
+
+[Service]
+Type=simple
+Environment=ROUTER_PORT=8788
+Environment=HEADROOM_URL=http://127.0.0.1:8787
+Environment=BRIDGE_URL=http://127.0.0.1:18765
+Environment=SMALL_FAST_MODEL=claude-sonnet-5
+Environment=CODEX_MODEL=gpt-5.5
+ExecStart=%h/.local/bin/uv run %h/claude-workflow/tools/chatgpt-toggle/router.py
+Restart=on-failure
+RestartSec=3
+
+[Install]
+WantedBy=default.target
