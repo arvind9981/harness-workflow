@@ -286,6 +286,17 @@ if [ -d "$REPO_DIR/claude/hooks" ]; then
   done
 fi
 
+# workflows: deploy saved Workflow scripts (e.g. fable-review) for name-based invocation
+if [ -d "$REPO_DIR/claude/workflows" ]; then
+  mkdir -p "$CLAUDE_DIR/workflows"
+  for w in "$REPO_DIR"/claude/workflows/*.js; do
+    [ -e "$w" ] || continue
+    backup "$CLAUDE_DIR/workflows/$(basename "$w")"
+    install -m 0644 "$w" "$CLAUDE_DIR/workflows/$(basename "$w")"
+    ok "workflow $(basename "$w") -> $CLAUDE_DIR/workflows/"
+  done
+fi
+
 if [ "$INSTALL_CODEX" = 1 ]; then
   step "Install Codex workflow"
   bash "$REPO_DIR/tools/codex/install-codex.sh"
