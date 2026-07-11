@@ -21,3 +21,10 @@ entities.json
 # MemPalace local memory store (machine-local; lives in $HOME, ignored defensively)
 /.mempalace/
 mempalace-data/
+
+# Machine-local Claude Code permissions/state (keep .claude/CLAUDE.md trackable)
+.claude/settings.local.json
+
+# Visual-plan artifacts and block reference (specs — on-disk reference only)
+/plans/
+/plan-blocks.md
