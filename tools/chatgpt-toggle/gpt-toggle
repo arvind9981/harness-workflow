@@ -1,0 +1,15 @@
+#!/usr/bin/env bash
+set -euo pipefail
+STATE_FILE="${GPT_TOGGLE_STATE_FILE:-$HOME/.config/chatgpt-toggle/state}"
+mkdir -p "$(dirname "$STATE_FILE")"
+
+case "${1:-status}" in
+  on)     echo gpt    > "$STATE_FILE"; echo "GPT path: ON  (main model → ChatGPT; small model stays on Claude)";;
+  off)    echo claude > "$STATE_FILE"; echo "GPT path: OFF (all → Claude via headroom)";;
+  status)
+    s="$(cat "$STATE_FILE" 2>/dev/null || echo claude)"
+    [ "$s" = gpt ] && echo "GPT path: ON" || echo "GPT path: OFF"
+    ;;
+  *) echo "usage: gpt-toggle {on|off|status}" >&2; exit 2;;
+esac
+echo "(takes effect on the next request — no need to restart claude)"
