@@ -4,6 +4,12 @@
 # Discovers actual git repos, writes graphify-repos.conf, runs graphify-sync.sh,
 # mines confirmed MINE outputs only when it is safe to write to mempalace, and
 # can prune stale graphify-out directories outside the discovered repo roots.
+#
+# MANUAL / OUT-OF-SESSION ONLY — not wired into any hook. It can CLI-mine and (with
+# --stop-live-mempalace) stop live writers, so running it while a Claude session is
+# open risks the concurrent-writer FTS5 corruption this stack guards against. For
+# in-session refreshes use the SessionStart nudge (graphify-reseed-session.sh ->
+# graphify-sync.sh) plus the in-process MCP mine tool instead.
 
 set -uo pipefail
 
