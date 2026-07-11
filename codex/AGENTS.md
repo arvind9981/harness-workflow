@@ -35,9 +35,3 @@ instructions take precedence over this file.
 - Treat mempalace as the default durable memory tier; do not create markdown memory files reflexively.
 - Do not run CLI `mempalace mine` during a live MCP-backed session.
 - Treat headroom as transparent routing/compression. When asked about savings, use `headroom perf` or the live proxy stats.
-
-## Skills
-
-<!-- BEGIN @agent-native/skills -->
-When using a high-cost frontier model for codebase-heavy work, use the /efficient-frontier skill always.
-<!-- END @agent-native/skills -->
