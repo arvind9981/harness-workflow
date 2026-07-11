@@ -150,8 +150,13 @@ elif [ -n "$in_repo" ]; then
   git_branch=$(git -C "$cwd" --no-optional-locks symbolic-ref --short HEAD 2>/dev/null \
     || git -C "$cwd" --no-optional-locks rev-parse --short HEAD 2>/dev/null)
 fi
-if [ -n "$in_repo" ] && [ -n "$(git -C "$cwd" --no-optional-locks status --porcelain 2>/dev/null | head -1)" ]; then
-  dirty=1
+# Dirty indicator. The untracked-file scan is what gets slow on very large worktrees,
+# so it's tunable: STATUSLINE_GIT_DIRTY = full (default; includes untracked) |
+# tracked (fast, tracked changes only via -uno) | off (skip the check entirely).
+dirty_mode="${STATUSLINE_GIT_DIRTY:-full}"
+if [ -n "$in_repo" ] && [ "$dirty_mode" != "off" ]; then
+  uflag="normal"; [ "$dirty_mode" = "tracked" ] && uflag="no"
+  [ -n "$(git -C "$cwd" --no-optional-locks status --porcelain --untracked-files="$uflag" 2>/dev/null | head -1)" ] && dirty=1
 fi
 [ -n "$git_branch" ] && git_branch=$(trunc "$git_branch" 18)
 
