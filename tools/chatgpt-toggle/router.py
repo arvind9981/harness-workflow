@@ -9,10 +9,18 @@ from dataclasses import dataclass
 HEADROOM_URL = os.environ.get("HEADROOM_URL", "http://127.0.0.1:8787")
 BRIDGE_URL = os.environ.get("BRIDGE_URL", "http://127.0.0.1:18765")
 SMALL_FAST_MODEL = os.environ.get("SMALL_FAST_MODEL", "claude-sonnet-5")
-CODEX_MODEL = os.environ.get("CODEX_MODEL", "gpt-5.5")
+CODEX_MODEL = os.environ.get("CODEX_MODEL", "gpt-5.5")  # last-resort literal only
 STATE_FILE = os.environ.get(
     "GPT_TOGGLE_STATE_FILE",
     os.path.expanduser("~/.config/chatgpt-toggle/state"),
+)
+MODEL_FILE = os.environ.get(  # explicit user override, if set
+    "GPT_TOGGLE_MODEL_FILE",
+    os.path.expanduser("~/.config/chatgpt-toggle/model"),
+)
+DEFAULT_FILE = os.environ.get(  # dynamically resolved default (gpt-toggle refresh)
+    "GPT_TOGGLE_DEFAULT_FILE",
+    os.path.expanduser("~/.config/chatgpt-toggle/model-default"),
 )
 ROUTER_PORT = int(os.environ.get("ROUTER_PORT", "8788"))
 
@@ -39,7 +47,7 @@ from starlette.applications import Starlette
 from starlette.requests import Request
 from starlette.responses import StreamingResponse, Response
 from starlette.routing import Route as StarletteRoute
-from toggle import read_state
+from toggle import read_state, read_model
 
 # Response headers we must NOT copy verbatim (length/encoding are recomputed by us).
 _DROP_RESP_HEADERS = {"content-length", "content-encoding", "transfer-encoding", "connection"}
@@ -53,8 +61,10 @@ async def proxy(request: Request) -> Response:
     except (ValueError, AttributeError):
         payload, model = None, ""
 
+    # explicit override > dynamically-resolved default > last-resort literal
+    codex_model = read_model(MODEL_FILE, read_model(DEFAULT_FILE, CODEX_MODEL))
     route = decide(model, read_state(STATE_FILE), SMALL_FAST_MODEL,
-                   HEADROOM_URL, BRIDGE_URL, CODEX_MODEL)
+                   HEADROOM_URL, BRIDGE_URL, codex_model)
 
     out_body = body
     if route.rewrite_model and payload is not None:

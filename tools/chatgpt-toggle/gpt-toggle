@@ -1,15 +1,64 @@
 #!/usr/bin/env bash
 set -euo pipefail
 STATE_FILE="${GPT_TOGGLE_STATE_FILE:-$HOME/.config/chatgpt-toggle/state}"
+MODEL_FILE="${GPT_TOGGLE_MODEL_FILE:-$HOME/.config/chatgpt-toggle/model}"
+DEFAULT_FILE="${GPT_TOGGLE_DEFAULT_FILE:-$HOME/.config/chatgpt-toggle/model-default}"
+BRIDGE_URL="${BRIDGE_URL:-http://127.0.0.1:18765}"
+DEFAULT_MODEL="gpt-5.5"   # last-resort literal only; the good default comes from `refresh`
 mkdir -p "$(dirname "$STATE_FILE")"
+
+available_gpt_models() {
+  claude-code-proxy models 2>/dev/null | tr ',' '\n' | grep -oE 'gpt-[0-9a-z.-]+' | sort -u
+}
+
+model_works() {  # ping-test a model against the bridge on this subscription
+  local m="$1" resp
+  resp="$(curl -s --max-time 25 -H 'content-type: application/json' -H 'x-api-key: anything' \
+    -H 'anthropic-version: 2023-06-01' "$BRIDGE_URL/v1/messages" \
+    -d "{\"model\":\"$m\",\"max_tokens\":8,\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}]}")"
+  printf '%s' "$resp" | grep -q "\"model\":\"$m\""
+}
+
+active_model() {  # explicit override > resolved default > last-resort literal
+  cat "$MODEL_FILE" 2>/dev/null || cat "$DEFAULT_FILE" 2>/dev/null || echo "$DEFAULT_MODEL"
+}
 
 case "${1:-status}" in
   on)     echo gpt    > "$STATE_FILE"; echo "GPT path: ON  (main model → ChatGPT; small model stays on Claude)";;
   off)    echo claude > "$STATE_FILE"; echo "GPT path: OFF (all → Claude via headroom)";;
   status)
     s="$(cat "$STATE_FILE" 2>/dev/null || echo claude)"
-    [ "$s" = gpt ] && echo "GPT path: ON" || echo "GPT path: OFF"
+    [ "$s" = gpt ] && echo "GPT path: ON (model: $(active_model))" || echo "GPT path: OFF"
     ;;
-  *) echo "usage: gpt-toggle {on|off|status}" >&2; exit 2;;
+  refresh)
+    best=""
+    for m in $(available_gpt_models | grep -vE -- '-(fast|mini)$' | sort -rV); do
+      if model_works "$m"; then best="$m"; break; fi
+    done
+    if [ -z "$best" ]; then echo "refresh: no working ChatGPT model found (bridge down or no entitlement)" >&2; exit 1; fi
+    mkdir -p "$(dirname "$DEFAULT_FILE")"; echo "$best" > "$DEFAULT_FILE"
+    echo "Default ChatGPT model resolved to: $best"
+    exit 0
+    ;;
+  model)
+    want="${2:-}"
+    if [ -z "$want" ]; then
+      if [ -f "$MODEL_FILE" ]; then echo "Active ChatGPT model: $(cat "$MODEL_FILE")  (explicit)"
+      else echo "Active ChatGPT model: $(active_model)  (auto)"; fi
+      echo "Available on your subscription bridge:"
+      available_gpt_models | sed 's/^/  /'
+      echo "Set: gpt-toggle model <name>   |   Back to auto: gpt-toggle model auto"
+      exit 0
+    elif [ "$want" = auto ]; then
+      rm -f "$MODEL_FILE"; echo "ChatGPT model: auto ($(active_model))"
+    elif ! available_gpt_models | grep -qx "$want"; then
+      echo "Unknown model: $want  (run 'gpt-toggle model' to list options)" >&2; exit 2
+    elif model_works "$want"; then
+      mkdir -p "$(dirname "$MODEL_FILE")"; echo "$want" > "$MODEL_FILE"; echo "ChatGPT model set to: $want (explicit)"
+    else
+      echo "Model '$want' does not work on your subscription." >&2; exit 1
+    fi
+    ;;
+  *) echo "usage: gpt-toggle {on|off|status|refresh|model [<name>|auto]}" >&2; exit 2;;
 esac
 echo "(takes effect on the next request — no need to restart claude)"
