@@ -31,66 +31,30 @@ requests in the moment take precedence over anything here.
   services without asking. (Web research is fine.)
 
 ## Memory & tooling defaults
-The local stack (mempalace for memory, headroom for the proxy) is installed to be
-used — reach for the right tool without being asked:
-- **Recall before re-deriving.** Before non-trivial work, or whenever I reference
-  past work ("did we…", "how did we…", "the X fix", "last time"), search memory
-  (`mempalace search`, `mempalace wake-up`, or the mempalace MCP tools —
-  search / traverse / kg_query) instead of reconstructing from scratch. A
-  `PreToolUse` hook (`mempalace-recall-enforce.sh`) injects a once-per-session
-  MANDATORY reminder on the first search/explore action as a backstop.
-- A `UserPromptSubmit` hook surfaces relevant verbatim drawers each turn. When
-  those hits are relevant, use them — but verify they still hold before relying on
-  them; they reflect what was true when captured.
-- Memory captures automatically (mempalace `SessionEnd` catchup-rebuild hook) — so
-  a finding already lands in mempalace by default. **Don't reflexively write a
-  `.md` for every finding.**
+The local stack — mempalace (memory) and headroom (proxy) — is installed to be used;
+reach for it without being asked.
+- **Recall before re-deriving.** Before non-trivial work, or whenever I reference past
+  work ("did we…", "the X fix", "last time"), search mempalace (`mempalace search` or the
+  MCP search / traverse / kg_query tools) instead of reconstructing. A per-turn
+  `UserPromptSubmit` hook also surfaces relevant drawers — use them when relevant, but
+  verify they still hold before relying on them (they reflect capture-time truth).
+- **Memory auto-captures** (SessionEnd hook) — a finding lands in mempalace by default.
+  Don't reflexively write a `.md` for every finding.
 - **Two memory tiers — choose deliberately:**
-  - **File-based `memory/*.md` + `MEMORY.md`** loads into context *every* session,
-    so it costs context-window space always. Reserve it for the small curated
-    always-load set: recovery procedures (must survive mempalace being down),
-    hard preferences, and "north-star" facts.
-  - **mempalace** is the default home for everything else — auto-captured, semantic
-    recall on demand, no per-session context cost. For a durable finding worth
-    guaranteed searchability, file it into mempalace deliberately (`add_drawer`),
-    not into a `.md`.
-- **Session recap ("where you left off").** A `Stop` hook
-  (`mempalace-recap-write.sh`) summarizes each session into a per-project recap
-  via a local model (`gemma4:e4b`, on-device, `think:false`), and a SessionStart
-  hook (`mempalace-recap-show.sh`) shows it next time. Falls back to a cleaned
-  list of recent prompts if Ollama/the model is unavailable.
-- **Graphify auto-syncs into mempalace (session-triggered, wipe-and-replace).** A
-  PostToolUse hook (`graphify-autoupdate.sh`) runs `graphify update .` on every code
-  change to keep `GRAPH_REPORT.md` fresh; a throttled SessionStart hook
-  (`graphify-reseed-session.sh`, at most once per ~12h) then NUDGES the agent to run
-  `~/.local/bin/graphify-sync.sh` (reads `graphify-repos.conf`) — which refreshes each
-  repo's AST and re-labels+stages ONLY repos whose code structure changed (node:edge
-  signature vs `hook_state/graph-sig-<leaf>`), printing `MINE wing=… source=…` lines
-  the agent mines and `SKIP` for unchanged repos (so big stable repos like xebia are
-  not re-labeled every window). Mining ALWAYS goes through the
-  **in-process MCP `mine` tool** (the only safe in-session writer): a separate CLI
-  `mempalace mine` alongside a live MCP server is two concurrent chroma writers and
-  corrupts its FTS5 index — so **never run `mempalace mine` (or `graphify-reseed.sh`)
-  from a hook or by hand while a session is live**. The standalone
-  `~/.local/bin/graphify-reseed.sh <repo>` is for out-of-session AST refreshes and
-  self-skips if an MCP server is up.
-- **AST map vs COMPLETE (named) map — the distinction that decides recall quality.**
-  `graphify update` is AST-only: it leaves communities as unnamed `Community N`
-  placeholders AND resets existing names on re-cluster. So the auto-sync above mines an
-  *unnamed* map unless it is labeled first. A complete map needs `graphify label`,
-  which names communities — with a trap: `graphify` is a shell FUNCTION that injects
-  `--backend claude-cli`, but **scripts, hooks, and `nohup` get the bare binary with NO
-  backend and silently keep placeholders** (exit 0, `Token cost: 0`). Any script/hook
-  that labels MUST pass it explicitly:
-  `GRAPHIFY_CLAUDE_CLI_MODEL=sonnet graphify label . --backend claude-cli`. Labeling
-  spawns the Claude CLI and needs a live session; it does NOT use headroom.
-- **Load a complete map (IN-session, opposite of the AST reseed):**
-  `~/.local/bin/graphify-complete-map.sh <repo>…` labels (verify-retries; refuses to
-  stage a placeholder report) + stages each report; the agent then mines each staged
-  report via the MCP `mine` tool. `~/.local/bin/reseed-verify.sh <repo>…` drives this
-  for several repos and emits `MINE wing=… source=…` handoff lines + a
-  `STATUS: PASS_PENDING_MCP_MINE`. Cheap refresh between full rebuilds: `graphify
-  update` only re-extract is free; re-label only when code structure actually changed.
+  - `memory/*.md` + `MEMORY.md` load *every* session (permanent context cost). Reserve for
+    the small curated always-load set: recovery procedures (must survive mempalace being
+    down), hard preferences, north-star facts.
+  - **mempalace** is the default for everything else — auto-captured, recalled on demand,
+    no per-session cost. File durable findings deliberately (`add_drawer`).
+- **Never run `mempalace mine` (or `graphify-reseed.sh`) from a hook or by hand while a
+  session is live** — a second chroma writer alongside the live MCP server corrupts the
+  FTS5 index. In-session mining ALWAYS goes through the in-process MCP `mine` tool.
+- **graphify↔mempalace pipeline.** Hooks keep the graph fresh and nudge a periodic
+  structural reseed. When the SessionStart banner asks for one, run
+  `~/.local/bin/graphify-sync.sh` and mine each `MINE wing=… source=…` line via the MCP
+  `mine` tool. Deeper mechanics (the `graphify label --backend claude-cli` shell-function
+  trap, node:edge signatures, complete-map scripts) are filed in mempalace — recall them
+  when working on the pipeline itself.
 
 ## graphify
 
