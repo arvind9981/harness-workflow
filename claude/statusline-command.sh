@@ -24,6 +24,8 @@ WHITE="240;244;248"      # light text
 DARKTX="24;26;30"        # dark text — for the bright amber chip
 DIR_BG="45;110;225"      # blue
 MODEL_BG="128;90;232"    # violet
+GPT_BG="222;90;58"       # burnt orange — shown ONLY when routed off Claude to the
+                         # GPT bridge, so an off-Claude session is unmistakable
 BRANCH_BG="17;145;150"   # teal
 CTX_OK="14;165;110"      # emerald   — ctx healthy
 FIVE_OK="20;150;190"     # cyan      — 5h healthy
@@ -83,12 +85,42 @@ cwd=$(_jq '.workspace.current_dir // .cwd // ""')
 dir="${cwd##*/}"; [ -z "$dir" ] && dir="~"
 dir=$(trunc "$dir" 18)
 
-# ── 2. model — strip "Claude " prefix, lowercase, hyphenate ──────────────────
+# ── 2. model ─────────────────────────────────────────────────────────────────
+# Claude Code reports the model IT selected — it never learns that the
+# chatgpt-toggle router swaps the request to the GPT bridge downstream. So we
+# mirror the router's decide() here from the same state files: when the GPT
+# path is active AND the selected model isn't the small/fast one (which always
+# stays on Claude), the served model is GPT — show that in a warm chip instead.
+model_id=$(_jq '.model.id // ""')
 model_raw=$(_jq '.model.display_name // .model.id // ""')
 model=$(echo "$model_raw" \
   | sed 's/^[Cc]laude[[:space:]]*//' \
+  | sed 's/[[:space:]]*([^)]*)[[:space:]]*$//' \
   | tr '[:upper:]' '[:lower:]' \
   | sed 's/[[:space:]]/-/g')
+
+# Router mirror — keep these paths/defaults in sync with router.py's decide().
+gpt_state_file="${GPT_TOGGLE_STATE_FILE:-$HOME/.config/chatgpt-toggle/state}"
+gpt_model_file="${GPT_TOGGLE_MODEL_FILE:-$HOME/.config/chatgpt-toggle/model}"
+gpt_default_file="${GPT_TOGGLE_DEFAULT_FILE:-$HOME/.config/chatgpt-toggle/model-default}"
+small_fast_model="${SMALL_FAST_MODEL:-claude-sonnet-5}"
+
+model_bg="$MODEL_BG"     # default: Claude (violet)
+gpt_toggle=$(cat "$gpt_state_file" 2>/dev/null)
+# decide() clause 1: small/fast id always stays on Claude, even on the GPT path.
+is_small=""
+case "$model_id" in
+  "$small_fast_model"|"$small_fast_model"-*) is_small=1 ;;
+esac
+# decide() clause 3: GPT path + non-small model => served by the GPT bridge.
+if [ "$gpt_toggle" = "gpt" ] && [ -z "$is_small" ]; then
+  gpt_model=$(cat "$gpt_model_file" 2>/dev/null \
+    || cat "$gpt_default_file" 2>/dev/null)
+  if [ -n "$gpt_model" ]; then
+    model="$gpt_model"       # show the model that actually serves
+    model_bg="$GPT_BG"       # warm chip = you are OFF Claude
+  fi
+fi
 
 # ── 3. context — % left; tokens remaining shown only in crit ─────────────────
 ctx_used=$(_jq '.context_window.total_input_tokens // empty')
@@ -162,7 +194,7 @@ fi
 
 # ── assemble ─────────────────────────────────────────────────────────────────
 out=$(chip "$DIR_BG" "$WHITE" " ${dir} ")
-[ -n "$model" ]     && out="${out}${GAP}$(chip "$MODEL_BG" "$WHITE" " ${model} ")"
+[ -n "$model" ]     && out="${out}${GAP}$(chip "$model_bg" "$WHITE" " ${model} ")"
 [ -n "$ctx_chip" ]  && out="${out}${GAP}${ctx_chip}"
 [ -n "$five_chip" ] && out="${out}${GAP}${five_chip}"
 [ -n "$week_chip" ] && out="${out}${GAP}${week_chip}"
