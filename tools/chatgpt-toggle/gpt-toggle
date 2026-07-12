@@ -9,8 +9,22 @@ DEFAULT_MODEL="gpt-5.5"   # last-resort literal only; the good default comes fro
 # summarised before it exceeds the ChatGPT/Codex backend's context window.
 SETTINGS_FILE="${CLAUDE_SETTINGS_FILE:-$HOME/.claude/settings.json}"
 SAVED_WINDOW_FILE="${GPT_TOGGLE_SAVED_WINDOW_FILE:-$HOME/.config/chatgpt-toggle/saved-autocompact}"
-GPT_COMPACT_WINDOW="${GPT_TOGGLE_COMPACT_WINDOW:-250000}"
+# Optional hard override; when set it wins over the per-model map below.
+GPT_TOGGLE_COMPACT_WINDOW="${GPT_TOGGLE_COMPACT_WINDOW:-}"
 mkdir -p "$(dirname "$STATE_FILE")"
+
+# Per-model autoCompactWindow. These are Codex/subscription INPUT-window
+# ceilings minus a margin for session overhead (system prompt + tool defs).
+# Measured: gpt-5.6-terra OK@350K, OVER@380K (Codex default ~353K).
+# gpt-5.5 and the 5.2-5.4 class: 272K input window (400K = 272K in + 128K out).
+window_for_model() {
+  [ -n "$GPT_TOGGLE_COMPACT_WINDOW" ] && { echo "$GPT_TOGGLE_COMPACT_WINDOW"; return; }
+  case "$1" in
+    gpt-5.6-*) echo 300000 ;;                          # ~353K ceiling, ~50K margin
+    gpt-5.5*|gpt-5.4*|gpt-5.3*|gpt-5.2*) echo 250000 ;; # 272K window, ~22K margin
+    *)         echo 250000 ;;                           # conservative default
+  esac
+}
 
 # Set autoCompactWindow to $1 in settings.json, or remove it when $1 is empty.
 set_autocompact() {
@@ -55,9 +69,10 @@ case "${1:-status}" in
       current_autocompact > "$SAVED_WINDOW_FILE"
     fi
     echo gpt > "$STATE_FILE"
-    set_autocompact "$GPT_COMPACT_WINDOW"
+    win="$(window_for_model "$(active_model)")"
+    set_autocompact "$win"
     echo "GPT path: ON  (main model → ChatGPT; small model stays on Claude)"
-    echo "Auto-compact window: $GPT_COMPACT_WINDOW tokens (GPT-safe)"
+    echo "Auto-compact window: $win tokens (GPT-safe for $(active_model))"
     ;;
   off)
     echo claude > "$STATE_FILE"
@@ -74,8 +89,13 @@ case "${1:-status}" in
     ;;
   status)
     s="$(cat "$STATE_FILE" 2>/dev/null || echo claude)"
-    [ "$s" = gpt ] && echo "GPT path: ON (model: $(active_model))" || echo "GPT path: OFF"
-    echo "Auto-compact window: $(current_autocompact)"
+    if [ "$s" = gpt ]; then
+      echo "GPT path: ON (model: $(active_model))"
+      echo "Auto-compact window: $(current_autocompact)  (map: $(window_for_model "$(active_model)"))"
+    else
+      echo "GPT path: OFF"
+      echo "Auto-compact window: $(current_autocompact)"
+    fi
     ;;
   refresh)
     best=""
@@ -104,6 +124,12 @@ case "${1:-status}" in
       mkdir -p "$(dirname "$MODEL_FILE")"; echo "$want" > "$MODEL_FILE"; echo "ChatGPT model set to: $want (explicit)"
     else
       echo "Model '$want' does not work on your subscription." >&2; exit 1
+    fi
+    # If GPT is currently on, re-apply the new model's mapped window immediately.
+    if [ "$(cat "$STATE_FILE" 2>/dev/null || echo claude)" = gpt ]; then
+      win="$(window_for_model "$(active_model)")"
+      set_autocompact "$win"
+      echo "Auto-compact window: $win tokens (GPT-safe for $(active_model))"
     fi
     ;;
   *) echo "usage: gpt-toggle {on|off|status|refresh|model [<name>|auto]}" >&2; exit 2;;
