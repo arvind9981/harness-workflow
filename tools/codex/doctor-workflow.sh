@@ -12,6 +12,7 @@ EMBEDDER="$HOME/.mempalace/palace/mempalace_embedder.json"
 PASS=0
 WARN=0
 FAIL=0
+NEXT_ACTION=""
 
 pass() {
   PASS=$((PASS + 1))
@@ -20,11 +21,13 @@ pass() {
 
 warn() {
   WARN=$((WARN + 1))
+  [ -n "$NEXT_ACTION" ] || NEXT_ACTION="Review the WARN lines above; they identify the next maintenance action."
   printf 'WARN %s\n' "$1"
 }
 
 fail() {
   FAIL=$((FAIL + 1))
+  NEXT_ACTION="Run ./tools/codex/install-codex.sh, then rerun this doctor."
   printf 'FAIL %s\n' "$1"
 }
 
@@ -83,6 +86,79 @@ check_global_agents() {
   fi
 }
 
+check_hook_installation() {
+  local rendered hook src dest bad=0
+  local hooks_json="$CODEX_DIR/hooks.json"
+
+  if [ ! -f "$hooks_json" ]; then
+    fail "$hooks_json missing"
+    return
+  fi
+
+  rendered="$(mktemp "${TMPDIR:-/tmp}/codex-hooksjson.XXXXXX")" || {
+    fail "could not create temporary hooks.json check"
+    return
+  }
+  sed "s#__HOME__#$HOME#g" "$REPO_DIR/codex/hooks.json" > "$rendered"
+  if cmp -s "$rendered" "$hooks_json"; then
+    pass "installed Codex hooks.json matches repo source"
+  else
+    fail "installed Codex hooks.json differs from repo source"
+    bad=1
+  fi
+  rm -f "$rendered"
+
+  for src in "$REPO_DIR"/workflow/hooks/*.sh; do
+    hook="$(basename "$src")"
+    dest="$CODEX_DIR/hooks/$hook"
+    if [ ! -x "$dest" ]; then
+      fail "Codex hook missing or not executable: $dest"
+      bad=1
+    elif cmp -s "$src" "$dest"; then
+      :
+    else
+      fail "Codex hook differs from repo source: $dest"
+      bad=1
+    fi
+  done
+  if [ "$bad" -eq 0 ]; then
+    pass "all repo-owned Codex hooks are installed and executable"
+  fi
+}
+
+check_fast_profile() {
+  local src="$REPO_DIR/codex/fast.config.toml"
+  local dest="$CODEX_DIR/fast.config.toml"
+
+  if [ ! -f "$dest" ]; then
+    fail "Codex fast profile missing: $dest"
+  elif cmp -s "$src" "$dest"; then
+    pass "Codex fast profile matches repo source"
+  else
+    fail "Codex fast profile differs from repo source"
+  fi
+}
+
+check_skill_installation() {
+  local src rel dest bad=0
+
+  [ -d "$REPO_DIR/workflow/skills" ] || return
+  while IFS= read -r -d '' src; do
+    rel="${src#"$REPO_DIR/workflow/skills/"}"
+    dest="$CODEX_DIR/skills/$rel"
+    if [ ! -f "$dest" ]; then
+      fail "Codex skill file missing: $dest"
+      bad=1
+    elif ! cmp -s "$src" "$dest"; then
+      fail "Codex skill file differs from repo source: $dest"
+      bad=1
+    fi
+  done < <(find "$REPO_DIR/workflow/skills" -type f -print0)
+  if [ "$bad" -eq 0 ]; then
+    pass "all shared workflow skills are installed in Codex"
+  fi
+}
+
 check_codex_config() {
   local config="$CODEX_DIR/config.toml"
 
@@ -137,10 +213,12 @@ check_embedder_sidecar() {
     return
   fi
 
-  if grep -q '"mempalace_drawers"' "$EMBEDDER" && grep -q '"mempalace_closets"' "$EMBEDDER"; then
-    pass "mempalace embedder sidecar has drawers and closets"
+  # Current MemPalace records the active drawers embedder here; closet vectors
+  # are validated by `repair-status` and need not have a duplicate sidecar key.
+  if grep -q '"mempalace_drawers"' "$EMBEDDER"; then
+    pass "mempalace embedder sidecar has a drawers identity"
   else
-    warn "mempalace embedder sidecar missing drawers or closets"
+    warn "mempalace embedder sidecar missing drawers identity"
   fi
 }
 
@@ -238,6 +316,9 @@ echo
 repos="$(discover_repos)"
 
 check_global_agents
+check_hook_installation
+check_skill_installation
+check_fast_profile
 check_codex_config
 check_headroom
 check_command mempalace
@@ -252,5 +333,12 @@ warn "MCP-native mempalace mining is not exposed to this shell doctor; CLI drain
 
 echo
 printf 'Summary: %s pass, %s warn, %s fail\n' "$PASS" "$WARN" "$FAIL"
+if [ "$FAIL" -gt 0 ]; then
+  printf 'Next action: %s\n' "$NEXT_ACTION"
+elif [ "$WARN" -gt 0 ]; then
+  printf 'Next action: %s\n' "$NEXT_ACTION"
+else
+  printf 'Next action: workflow healthy; no action needed.\n'
+fi
 
 [ "$FAIL" -eq 0 ]

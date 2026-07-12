@@ -4,6 +4,7 @@
 # wing. Instant (plain file read, no model, no chroma). Emits nothing if there's
 # no recap, or if the stored recap belongs to the session being resumed.
 command -v python3 >/dev/null 2>&1 || exit 0
+[ "${CODEX_WORKFLOW_FAST:-}" = 1 ] && exit 0
 payload="$(cat 2>/dev/null)"
 
 RECAP_DIR="$HOME/.mempalace/recaps" PAYLOAD="$payload" python3 - <<'PY'
@@ -33,6 +34,9 @@ except Exception:
 recap = (rec.get("recap") or "").strip()
 if not recap:
     sys.exit(0)
+# Keep the resume reminder useful without competing with the structured
+# mempalace wake-up context injected by the preceding SessionStart hook.
+recap = recap[:900]
 # Don't replay a recap of the very session being resumed.
 if rec.get("session_id") and rec.get("session_id") == cur_sid:
     sys.exit(0)

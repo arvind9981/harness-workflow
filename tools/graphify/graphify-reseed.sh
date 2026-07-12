@@ -7,7 +7,7 @@
 # DB, which corrupts its FTS5 index ("malformed inverted index"). So the script
 # SKIPS whenever a mempalace-mcp process is running. In-session refreshes go
 # through the in-process MCP mine tool, nudged by the SessionStart hook
-# (claude/hooks/graphify-reseed-session.sh) — which mines from the SAME stable
+# (workflow/hooks/graphify-reseed-session.sh) — which mines from the SAME stable
 # stage path used here, so the in-process mine is idempotent.
 #
 # WHY A STABLE STAGE PATH (not mktemp): `mempalace mine` is idempotent only for a

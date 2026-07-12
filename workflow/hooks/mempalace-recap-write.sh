@@ -11,6 +11,7 @@
 # a mid-write kill is harmless. Always exits 0.
 
 # ---- parent: re-exec detached, passing the hook payload on stdin, then exit ---
+[ "${CODEX_WORKFLOW_FAST:-}" = 1 ] && exit 0
 if [ "${MEMPALACE_RECAP_CHILD:-}" != "1" ]; then
   payload="$(cat 2>/dev/null)"
   # setsid isn't shipped on macOS; fall back to plain nohup+disown there.

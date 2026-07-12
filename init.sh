@@ -270,10 +270,10 @@ if [ -f "$REPO_DIR/claude/statusline-command.sh" ]; then
   install -m 0755 "$REPO_DIR/claude/statusline-command.sh" "$CLAUDE_DIR/statusline-command.sh"
   ok "statusline-command.sh -> $CLAUDE_DIR/"
 fi
-# hooks: deploy any repo hook scripts (e.g. mempalace recall) referenced by settings.json
-if [ -d "$REPO_DIR/claude/hooks" ]; then
+# shared hooks: deploy repo-owned lifecycle scripts referenced by settings.json
+if [ -d "$REPO_DIR/workflow/hooks" ]; then
   mkdir -p "$CLAUDE_DIR/hooks"
-  for h in "$REPO_DIR"/claude/hooks/*.sh; do
+  for h in "$REPO_DIR"/workflow/hooks/*.sh; do
     [ -e "$h" ] || continue
     backup "$CLAUDE_DIR/hooks/$(basename "$h")"
     install -m 0755 "$h" "$CLAUDE_DIR/hooks/$(basename "$h")"
@@ -298,9 +298,30 @@ step "Codex workflow (auto-detected)"
 # installed, leave the machine untouched.
 if command -v codex >/dev/null 2>&1; then
   bash "$REPO_DIR/tools/codex/install-codex.sh"
+  if bash "$REPO_DIR/tools/codex/doctor-workflow.sh"; then
+    ok "Codex workflow verified"
+  else
+    warn "Codex workflow installed; doctor reported local follow-up"
+  fi
   ok "Codex detected — hooks/instructions migrated into ~/.codex"
 else
   info "codex not installed — skipping (nothing to migrate)"
+fi
+
+step "OpenCode workflow (auto-detected)"
+# OpenCode has its own plugin and MCP contract. If it is installed, deploy the
+# repo-owned adapter and let its installer register only the local Mempalace and
+# Headroom servers; if it is absent, leave the machine untouched.
+if command -v opencode >/dev/null 2>&1; then
+  bash "$REPO_DIR/tools/opencode/install-opencode.sh"
+  if bash "$REPO_DIR/tools/opencode/doctor-workflow.sh"; then
+    ok "OpenCode workflow verified"
+  else
+    warn "OpenCode workflow installed; doctor reported local follow-up"
+  fi
+  ok "OpenCode detected — workflow plugin, helpers, and local MCPs installed"
+else
+  info "opencode not installed — skipping (nothing to migrate)"
 fi
 
 # ---------------------------------------------------------------------------
@@ -543,13 +564,13 @@ fi
 # ---------------------------------------------------------------------------
 step "graphify→mempalace reseed (SessionStart hook)"
 # Reseeding is triggered by a throttled SessionStart hook
-# (claude/hooks/graphify-reseed-session.sh), NOT a wall-clock cron: the laptop is
+# (workflow/hooks/graphify-reseed-session.sh), NOT a wall-clock cron: the laptop is
 # off at night, so a nightly timer never fires. The hook runs when a session
 # starts (machine on), at most once per ~12h. It is NUDGE-ONLY: it asks the agent
 # (via additionalContext) to refresh through the in-process MCP mine tool — the
 # only safe in-session writer — and mines nothing itself. A competing CLI mine
 # alongside the live MCP server corrupts the palace's FTS5 index, so the hook never
-# runs one. See claude/hooks/graphify-reseed-session.sh.
+# runs one. See workflow/hooks/graphify-reseed-session.sh.
 reseed_repos=()
 for repo in "${GRAPHIFY_REPOS[@]}"; do
   if [ -d "$repo" ]; then

@@ -1,0 +1,6 @@
+# Lightweight Codex sessions: preserve routing and safety, but skip optional
+# memory/graph maintenance through CODEX_WORKFLOW_FAST in the shared hooks.
+model_reasoning_effort = "medium"
+
+[shell_environment_policy.set]
+CODEX_WORKFLOW_FAST = "1"

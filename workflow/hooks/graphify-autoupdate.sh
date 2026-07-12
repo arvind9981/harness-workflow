@@ -11,6 +11,7 @@
 # Self-guarding: no-op unless a graph already exists (never builds from scratch),
 # single-flight via pgrep, and detached so the edit returns immediately.
 [ -f graphify-out/graph.json ] || exit 0
+[ "${CODEX_WORKFLOW_FAST:-}" = 1 ] && exit 0
 GRAPHIFY="${GRAPHIFY_BIN:-$HOME/.local/bin/graphify}"
 if [ ! -x "$GRAPHIFY" ]; then
   GRAPHIFY="$(command -v graphify 2>/dev/null || true)"

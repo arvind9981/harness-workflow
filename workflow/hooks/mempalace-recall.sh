@@ -13,6 +13,7 @@ MEMPALACE="$HOME/.local/bin/mempalace"
 [ -x "$MEMPALACE" ] || exit 0
 command -v jq >/dev/null 2>&1 || exit 0
 command -v python3 >/dev/null 2>&1 || exit 0
+[ "${CODEX_WORKFLOW_FAST:-}" = 1 ] && exit 0
 
 prompt="$(cat | jq -r '.prompt // .user_prompt // empty' 2>/dev/null)"
 [ -n "$prompt" ] || exit 0
@@ -24,7 +25,7 @@ MIN_SIM="${MEMPALACE_RECALL_MIN_SIM:-0.45}"        # drop hits weaker than this 
                                                    # (kept at 0.45: useful hits cluster 0.45-0.47;
                                                    #  a higher floor cuts signal, not just noise)
 MAX_PER_SRC="${MEMPALACE_RECALL_MAX_PER_SRC:-1}"   # cap chunks from one source file (1 = max diversity)
-MAX_HITS="${MEMPALACE_RECALL_MAX_HITS:-3}"         # final number of drawers injected (top-ranked only)
+MAX_HITS="${MEMPALACE_RECALL_MAX_HITS:-2}"         # final number of drawers injected (top-ranked only)
 CANDIDATES="${MEMPALACE_RECALL_CANDIDATES:-12}"    # over-fetch, then filter down
 SEARCH_TIMEOUT_S="${MEMPALACE_RECALL_TIMEOUT_S:-8}" # per-call palace search timeout (cold-starts
                                                    #  python/chromadb; keep >= ~5-6s to avoid killing
@@ -116,7 +117,7 @@ PY
 ctx="$(printf '%s' "$raw" | MIN_SIM="$MIN_SIM" MAX_PER_SRC="$MAX_PER_SRC" MAX_HITS="$MAX_HITS" python3 -c "$FILTER")"
 
 [ -n "$ctx" ] || exit 0
-ctx="$(printf '%s' "$ctx" | head -c 2500)"
+ctx="$(printf '%s' "$ctx" | head -c 1800)"
 
 jq -cn --arg c "$ctx" \
   '{hookSpecificOutput:{hookEventName:"UserPromptSubmit",additionalContext:("Relevant memory (mempalace verbatim recall):\n"+$c)}}'

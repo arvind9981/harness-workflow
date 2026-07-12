@@ -7,7 +7,7 @@
           {
             "type": "command",
             "command": "test -d __HOME__/.headroom/deploy/init-user || __HOME__/.local/bin/headroom init hook ensure --profile init-user --marker headroom-init-codex",
-            "timeout": 15
+            "timeout": 5
           }
         ]
       },
@@ -64,18 +64,18 @@
           {
             "type": "command",
             "command": "__HOME__/.codex/hooks/mempalace-health.sh",
-            "timeout": 5
+            "timeout": 2
           },
           {
             "type": "command",
             "command": "__HOME__/.codex/hooks/mempalace-recap-show.sh",
-            "timeout": 5,
+            "timeout": 3,
             "statusMessage": "Recalling where you left off..."
           },
           {
             "type": "command",
             "command": "__HOME__/.codex/hooks/graphify-reseed-session.sh",
-            "timeout": 10
+            "timeout": 3
           }
         ]
       }
@@ -86,7 +86,7 @@
           {
             "type": "command",
             "command": "__HOME__/.codex/hooks/mempalace-recall.sh",
-            "timeout": 12,
+            "timeout": 8,
             "statusMessage": "Recalling memory (mempalace)..."
           }
         ]

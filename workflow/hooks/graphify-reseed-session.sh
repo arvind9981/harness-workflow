@@ -8,6 +8,7 @@
 # (observed). The only safe in-session write goes through the running MCP server,
 # i.e. the agent does it. So this hook emits a request and touches NOTHING.
 set -euo pipefail
+[ "${CODEX_WORKFLOW_FAST:-}" = 1 ] && exit 0
 
 CONF="${GRAPHIFY_REPOS_CONF:-$HOME/.mempalace/graphify-repos.conf}"
 STATE="$HOME/.mempalace/hook_state"

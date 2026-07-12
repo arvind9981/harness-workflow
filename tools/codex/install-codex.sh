@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Install the Claude workflow's local hooks/instructions into Codex.
+# Install the workflow's shared hooks and Codex instructions into Codex.
 #
 # This intentionally avoids plugin marketplace setup. Codex owns its plugin
 # catalog in ~/.codex/config.toml; this script only wires the workflow pieces
@@ -42,12 +42,28 @@ require() {
 require python3
 require sed
 
-mkdir -p "$CODEX_DIR/hooks"
+mkdir -p "$CODEX_DIR/hooks" "$CODEX_DIR/skills"
 
-for hook in "$REPO_DIR"/claude/hooks/*.sh; do
+for hook in "$REPO_DIR"/workflow/hooks/*.sh; do
   [ -e "$hook" ] || continue
   install_if_changed "$hook" "$CODEX_DIR/hooks/$(basename "$hook")" 0755
 done
+
+# Install shared workflow skills without touching unrelated personal skills.
+if [ -d "$REPO_DIR/workflow/skills" ]; then
+  while IFS= read -r -d '' src; do
+    rel="${src#"$REPO_DIR/workflow/skills/"}"
+    dest="$CODEX_DIR/skills/$rel"
+    mkdir -p "$(dirname "$dest")"
+    mode=0644
+    [ -x "$src" ] && mode=0755
+    install_if_changed "$src" "$dest" "$mode"
+  done < <(find "$REPO_DIR/workflow/skills" -type f -print0)
+fi
+
+# Older Codex builds do not register ~/.codex/commands. Remove only the
+# obsolete command this workflow previously installed; leave user files alone.
+rm -f "$CODEX_DIR/commands/consult.md"
 
 # Render __HOME__ first, then write hooks.json only if the result differs.
 rendered="$(mktemp "${TMPDIR:-/tmp}/codex-hooksjson.XXXXXX")"
@@ -56,6 +72,7 @@ install_if_changed "$rendered" "$CODEX_DIR/hooks.json" 0644
 rm -f "$rendered"
 
 install_if_changed "$REPO_DIR/codex/AGENTS.md" "$CODEX_DIR/AGENTS.md" 0644
+install_if_changed "$REPO_DIR/codex/fast.config.toml" "$CODEX_DIR/fast.config.toml" 0644
 
 config="$CODEX_DIR/config.toml"
 touch "$config"

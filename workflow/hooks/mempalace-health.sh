@@ -5,7 +5,11 @@
 # auto-repairs a corrupt index — runs in mempalace-health-deep.sh, reparented
 # away from Claude Code so a hook timeout can't SIGKILL it mid-repair.
 # Emits no context (exit 0, no stdout).
-DEEP="$HOME/.claude/hooks/mempalace-health-deep.sh"
+# Resolve relative to this installed wrapper.  The same repo-owned hook is
+# installed into both ~/.claude/hooks and ~/.codex/hooks, so hard-coding the
+# former made Codex depend on a separate Claude installation.
+HOOK_DIR="$(cd "$(dirname "$0")" && pwd)"
+DEEP="$HOOK_DIR/mempalace-health-deep.sh"
 # setsid is Linux-only; on macOS fall back to nohup+disown (still detaches enough
 # that a hook timeout won't SIGKILL the worker mid-repair).
 if [ -x "$DEEP" ]; then

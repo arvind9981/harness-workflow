@@ -78,9 +78,9 @@ Retrieval is fully local (local embeddings, no API calls). The wiring:
 - **Capture** is automatic via the mempalace *plugin's* `Stop` / `PreCompact`
   hooks, which mine the session into the palace.
 - **Recall** is wired two ways through repo hooks in `settings.json`:
-  - `SessionStart` → `claude/hooks/mempalace-context.sh` injects a project-scoped
+  - `SessionStart` → `workflow/hooks/mempalace-context.sh` injects a project-scoped
     "wake-up" summary (identity + the essential story for the current wing).
-  - `UserPromptSubmit` → `claude/hooks/mempalace-recall.sh` injects the verbatim
+  - `UserPromptSubmit` → `workflow/hooks/mempalace-recall.sh` injects the verbatim
     drawers most relevant to each prompt (semantic + bm25, over-fetched then
     filtered by a similarity floor and a per-source cap).
   - Plus the mempalace MCP tools (search / traverse / kg_query) on demand.
@@ -157,12 +157,31 @@ tolerated-but-gray-zone path for personal use on your own subscription — see S
 ## Codex
 
 Codex support is **auto-detected**: if the `codex` CLI is present, `init.sh` runs
-`tools/codex/install-codex.sh`, which installs the repo-maintained Codex
+`tools/codex/install-codex.sh` and its doctor, which install and verify the repo-maintained Codex
 instructions/hooks into `~/.codex`, preserves existing `config.toml` content, and
 upserts the shell environment Codex needs — `~/.local/bin` on PATH, a real terminal
 type (`TERM=xterm-256color`), and the headroom proxy URLs (`ANTHROPIC_BASE_URL` /
 `OPENAI_BASE_URL`, routing model traffic through headroom `:8787`). If `codex` isn't
 installed, the step is skipped and nothing is touched.
+
+## OpenCode (optional)
+
+OpenCode is a parallel, model-neutral adapter. It does not make the underlying
+model's context window larger; that limit comes from the provider and model you
+select. Install OpenCode separately, then install this workflow's read-only
+`/consult` command, agent, and skill:
+
+```bash
+npm install -g opencode-ai
+./tools/opencode/install-opencode.sh
+./tools/opencode/doctor-workflow.sh
+```
+
+The adapter writes its command, agent, shared skills, lifecycle plugin, and
+shared helpers under `~/.config/opencode`; it also adds the local `mempalace` and
+`headroom` MCPs using OpenCode's CLI. It does not change providers, credentials,
+models, or project configuration. Restart OpenCode after installation, then use
+`/consult <question>`.
 
 ## What it deliberately does NOT do
 

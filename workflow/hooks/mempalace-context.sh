@@ -10,12 +10,13 @@
 MEMPALACE="$HOME/.local/bin/mempalace"
 [ -x "$MEMPALACE" ] || exit 0
 command -v jq >/dev/null 2>&1 || exit 0
+[ "${CODEX_WORKFLOW_FAST:-}" = 1 ] && exit 0
 
 # timeout(1) is GNU coreutils — absent on stock macOS. Use it when present,
 # otherwise degrade to running the command without a time limit.
 _to() { _s="$1"; shift; if command -v timeout >/dev/null 2>&1; then timeout "$_s" "$@"; else "$@"; fi; }
 
-MAX_BYTES="${MEMPALACE_CTX_MAX_BYTES:-2200}"   # hard cap on injected context
+MAX_BYTES="${MEMPALACE_CTX_MAX_BYTES:-1500}"   # hard cap on injected context
 
 # cwd comes from the hook payload (fallback to $PWD); wing = slug of its leaf dir.
 cwd="$(cat 2>/dev/null | jq -r '.cwd // empty' 2>/dev/null)"
