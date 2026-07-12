@@ -14,6 +14,7 @@ def _client(monkeypatch, tmp_path, state, model="gpt-5.5"):
     (tmp_path / "model").write_text(model)
     monkeypatch.setattr(router, "STATE_FILE", str(tmp_path / "state"))
     monkeypatch.setattr(router, "MODEL_FILE", str(tmp_path / "model"))
+    monkeypatch.setattr(router, "USAGE_FILE", str(tmp_path / "gpt-usage.json"))
     monkeypatch.setattr(router, "SMALL_FAST_MODEL", "claude-sonnet-5")
     monkeypatch.setattr(router, "CODEX_MODEL", "gpt-5.5")
     return TestClient(router.app)
@@ -60,3 +61,34 @@ def test_toggle_off_sends_main_model_to_headroom(monkeypatch, tmp_path):
     client = _client(monkeypatch, tmp_path, "claude")
     client.post("/v1/messages", json={"model": "claude-opus-4-8", "max_tokens": 8, "messages": []})
     assert route.called
+
+
+@respx.mock
+def test_gpt_request_is_written_to_usage_file(monkeypatch, tmp_path):
+    respx.post("http://127.0.0.1:18765/v1/messages").mock(
+        return_value=httpx.Response(200, json={"ok": True}))
+    client = _client(monkeypatch, tmp_path, "gpt")
+    client.post("/v1/messages", json={"model": "claude-opus-4-8", "max_tokens": 8, "messages": []})
+    usage = json.loads((tmp_path / "gpt-usage.json").read_text())
+    assert len(usage["requests"]) == 1
+    assert "last_rate_limit_at" not in usage
+
+
+@respx.mock
+def test_claude_request_writes_no_usage_file(monkeypatch, tmp_path):
+    respx.post("http://127.0.0.1:8787/v1/messages").mock(
+        return_value=httpx.Response(200, json={"ok": True}))
+    client = _client(monkeypatch, tmp_path, "claude")
+    client.post("/v1/messages", json={"model": "claude-opus-4-8", "max_tokens": 8, "messages": []})
+    assert not (tmp_path / "gpt-usage.json").exists()
+
+
+@respx.mock
+def test_bridge_rate_limit_marks_usage_file(monkeypatch, tmp_path):
+    respx.post("http://127.0.0.1:18765/v1/messages").mock(
+        return_value=httpx.Response(502, json={"error": {"message": "rate limit reached"}}))
+    client = _client(monkeypatch, tmp_path, "gpt")
+    client.post("/v1/messages", json={"model": "claude-opus-4-8", "max_tokens": 8, "messages": []})
+    usage = json.loads((tmp_path / "gpt-usage.json").read_text())
+    assert usage["last_rate_limit_at"] is not None
+    assert len(usage["requests"]) == 1

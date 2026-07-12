@@ -22,6 +22,10 @@ DEFAULT_FILE = os.environ.get(  # dynamically resolved default (gpt-toggle refre
     "GPT_TOGGLE_DEFAULT_FILE",
     os.path.expanduser("~/.config/chatgpt-toggle/model-default"),
 )
+USAGE_FILE = os.environ.get(  # rolling GPT request accounting for the status bar
+    "GPT_TOGGLE_USAGE_FILE",
+    os.path.expanduser("~/.config/chatgpt-toggle/gpt-usage.json"),
+)
 ROUTER_PORT = int(os.environ.get("ROUTER_PORT", "8788"))
 
 
@@ -51,15 +55,41 @@ def decide(model, toggle, small_fast_model, headroom_url, bridge_url, codex_mode
 
 
 import json
+import time
+import tempfile
 import httpx
 from starlette.applications import Starlette
 from starlette.requests import Request
 from starlette.responses import StreamingResponse, Response
 from starlette.routing import Route as StarletteRoute
 from toggle import read_state, read_model
+from usage import record_usage
 
 # Response headers we must NOT copy verbatim (length/encoding are recomputed by us).
 _DROP_RESP_HEADERS = {"content-length", "content-encoding", "transfer-encoding", "connection"}
+
+
+def _persist_gpt_usage(status: int) -> None:
+    """Fold one GPT-routed request into the usage state file (best-effort).
+
+    Atomic write (temp file + rename) so a concurrent status-bar read never
+    sees a half-written file. Never raises into the request path.
+    """
+    try:
+        try:
+            with open(USAGE_FILE) as f:
+                state = json.load(f)
+        except (FileNotFoundError, ValueError):
+            state = {}
+        state = record_usage(state, dest="gpt", status=status, now=int(time.time()))
+        d = os.path.dirname(USAGE_FILE)
+        os.makedirs(d, exist_ok=True)
+        fd, tmp = tempfile.mkstemp(dir=d, prefix=".gpt-usage-", suffix=".tmp")
+        with os.fdopen(fd, "w") as f:
+            json.dump(state, f)
+        os.replace(tmp, USAGE_FILE)
+    except OSError:
+        pass  # telemetry must never break routing
 
 
 async def proxy(request: Request) -> Response:
@@ -99,6 +129,12 @@ async def proxy(request: Request) -> Response:
         request.method, url, headers=headers, content=out_body,
         params=request.query_params)
     upstream = await client.send(upstream_req, stream=True)
+
+    # Record GPT-bridge requests for the status bar (headers are in; body still
+    # streams). Claude-path requests are not recorded — Claude Code already
+    # reports those via .rate_limits in the status-line JSON.
+    if route.upstream == BRIDGE_URL:
+        _persist_gpt_usage(upstream.status_code)
 
     async def stream():
         try:

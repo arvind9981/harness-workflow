@@ -106,6 +106,7 @@ gpt_default_file="${GPT_TOGGLE_DEFAULT_FILE:-$HOME/.config/chatgpt-toggle/model-
 small_fast_model="${SMALL_FAST_MODEL:-claude-sonnet-5}"
 
 model_bg="$MODEL_BG"     # default: Claude (violet)
+on_gpt=""                # set when this session's requests are served by GPT
 gpt_toggle=$(cat "$gpt_state_file" 2>/dev/null)
 # decide() clause 1: small/fast id always stays on Claude, even on the GPT path.
 is_small=""
@@ -119,6 +120,7 @@ if [ "$gpt_toggle" = "gpt" ] && [ -z "$is_small" ]; then
   if [ -n "$gpt_model" ]; then
     model="$gpt_model"       # show the model that actually serves
     model_bg="$GPT_BG"       # warm chip = you are OFF Claude
+    on_gpt=1
   fi
 fi
 
@@ -140,45 +142,94 @@ ctx_chip=""
 if [ -n "$rem_pct" ] && [ -n "$ctx_total" ]; then
   rem_int=$(printf '%.0f' "$rem_pct")
   IFS='|' read -r bg fg <<< "$(stateful "$rem_int" "$CTX_OK")"
-  # Normal: show % left plus the window capacity (· 1M). When critical (≤10%),
-  # swap the capacity tag for the more urgent tokens-remaining readout.
-  label=" ctx ${rem_int}% · $(fmt_cap "$ctx_total") "
+  # ctx_total is Claude Code's window for the model IT selected (a Claude model).
+  # On the GPT path the served model has a different, smaller window, so showing
+  # that capacity (· 1M) would misrepresent the GPT model — omit it and show %
+  # only. When critical (≤10%), the tokens-remaining readout is a raw count of
+  # what Claude Code is tracking locally, which is honest on either path.
+  label=" ctx ${rem_int}% "
+  if [ -z "$on_gpt" ]; then
+    label=" ctx ${rem_int}% · $(fmt_cap "$ctx_total") "
+  fi
   if [ "$rem_int" -le 10 ] && [ -n "$ctx_used" ]; then
     label=" ctx ${rem_int}% · $(fmt_k "$(( ctx_total - ctx_used ))") left "
   fi
   ctx_chip=$(chip "$bg" "$fg" "$label")
 fi
 
-# ── 4. 5-hour rate limit — % left; reset shown only when low ─────────────────
+# ── 4 & 5. usage chips ───────────────────────────────────────────────────────
+# Two independent data sources, shown together because both models are in play:
+#   • Claude (native): Anthropic 5h/7d percentages from the status-line JSON.
+#     Claude Code only populates these from Claude-served responses, so on the
+#     GPT path (main turn served by GPT) they're usually absent — housekeeping
+#     Sonnet calls don't surface here. Labelled "5h"/"7d" on the pure-Claude
+#     path; prefixed "c·" on the GPT path to distinguish from the GPT chips.
+#   • GPT (local): request COUNTS from gpt-usage.json, which the router writes
+#     per GPT-bridge request. Honest count + local rolling-window expiry — never
+#     a fabricated % or a claimed provider reset (the bridge exposes neither).
+# On the GPT path we render BOTH when data exists: gpt-5h, c·5h, gpt-7d, c·7d.
+five_chip=""; week_chip=""            # Claude-native chips (may relabel on GPT path)
+gpt_five_chip=""; gpt_week_chip=""    # GPT local-count chips
+
+# --- Claude-native chips (render whenever Claude Code provides rate_limits) ---
+c_prefix=""; [ -n "$on_gpt" ] && c_prefix="c·"   # disambiguate on the GPT path
 five_pct=$(_jq '.rate_limits.five_hour.used_percentage // empty')
 five_reset=$(_jq '.rate_limits.five_hour.resets_at // empty')
-
-five_chip=""
 if [ -n "$five_pct" ]; then
   left=$(( 100 - $(printf '%.0f' "$five_pct") ))
   IFS='|' read -r bg fg <<< "$(stateful "$left" "$FIVE_OK")"
-  label=" 5h ${left}% "
+  label=" ${c_prefix}5h ${left}% "
   if [ "$left" -le 30 ]; then
     rst=$(fmt_reset "$five_reset")
-    [ -n "$rst" ] && label=" 5h ${left}% · ${rst} "
+    [ -n "$rst" ] && label=" ${c_prefix}5h ${left}% · ${rst} "
   fi
   five_chip=$(chip "$bg" "$fg" "$label")
 fi
 
-# ── 5. 7-day rate limit — % left; reset shown only when low ──────────────────
 week_pct=$(_jq '.rate_limits.seven_day.used_percentage // empty')
 week_reset=$(_jq '.rate_limits.seven_day.resets_at // empty')
-
-week_chip=""
 if [ -n "$week_pct" ]; then
   left=$(( 100 - $(printf '%.0f' "$week_pct") ))
   IFS='|' read -r bg fg <<< "$(stateful "$left" "$WEEK_OK")"
-  label=" 7d ${left}% "
+  label=" ${c_prefix}7d ${left}% "
   if [ "$left" -le 30 ]; then
     rst=$(fmt_reset "$week_reset")
-    [ -n "$rst" ] && label=" 7d ${left}% · ${rst} "
+    [ -n "$rst" ] && label=" ${c_prefix}7d ${left}% · ${rst} "
   fi
   week_chip=$(chip "$bg" "$fg" "$label")
+fi
+
+# --- GPT local-count chips (only on the GPT path) ---
+if [ -n "$on_gpt" ]; then
+  usage_file="${GPT_TOGGLE_USAGE_FILE:-$HOME/.config/chatgpt-toggle/gpt-usage.json}"
+  now=$(date +%s)
+  # "<5h count> <7d count> <last_rate_limit_epoch|->" (mirrors usage.py windows).
+  read -r g5 g7 glimit <<< "$(
+    jq -r --argjson now "$now" '
+      (5*3600) as $fh | (7*24*3600) as $sd |
+      (.requests // []) as $r |
+      [ ([$r[] | select($now - . <= $fh)] | length),
+        ([$r[] | select($now - . <= $sd)] | length),
+        (.last_rate_limit_at // "-") ] | @tsv
+    ' "$usage_file" 2>/dev/null | tr '\t' ' '
+  )"
+  g5="${g5:-0}"; g7="${g7:-0}"; glimit="${glimit:--}"
+
+  # 5h: request count, matching the native "5h" chip shape. The model chip
+  # already says gpt-*, so no redundant "gpt" here. A recent throttle is the one
+  # high-value signal — it takes over the chip in warm.
+  fchip_bg="$FIVE_OK"; fchip_fg="$WHITE"; flabel=" 5h: ${g5} "
+  if [ "$glimit" != "-" ]; then
+    ago=$(( now - glimit ))
+    if [ "$ago" -ge 0 ] && [ "$ago" -le 1800 ]; then   # within 30 min
+      fchip_bg="$WARN_BG"; fchip_fg="$DARKTX"
+      flabel=" 5h: throttled $(( ago / 60 ))m ago "
+    fi
+  fi
+  gpt_five_chip=$(chip "$fchip_bg" "$fchip_fg" "$flabel")
+
+  # 7d: request count.
+  [ "$g7" -gt 0 ] && gpt_week_chip=$(chip "$WEEK_OK" "$WHITE" " 7d: ${g7} ")
 fi
 
 # ── 6. git branch (+ dirty marker) ───────────────────────────────────────────
@@ -207,8 +258,11 @@ fi
 out=$(chip "$DIR_BG" "$WHITE" " ${dir} ")
 [ -n "$model" ]     && out="${out}${GAP}$(chip "$model_bg" "$WHITE" " ${model} ")"
 [ -n "$ctx_chip" ]  && out="${out}${GAP}${ctx_chip}"
-[ -n "$five_chip" ] && out="${out}${GAP}${five_chip}"
-[ -n "$week_chip" ] && out="${out}${GAP}${week_chip}"
+# GPT (local counts) then Claude (native %) — both when the GPT path has data.
+[ -n "$gpt_five_chip" ] && out="${out}${GAP}${gpt_five_chip}"
+[ -n "$five_chip" ]     && out="${out}${GAP}${five_chip}"
+[ -n "$gpt_week_chip" ] && out="${out}${GAP}${gpt_week_chip}"
+[ -n "$week_chip" ]     && out="${out}${GAP}${week_chip}"
 if [ -n "$git_branch" ]; then
   blabel=" ${git_branch} "
   [ -n "$dirty" ] && blabel=" ${git_branch} \033[38;2;${DIRTY}m●\033[38;2;${WHITE}m "
