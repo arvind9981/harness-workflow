@@ -32,10 +32,19 @@ class Route:
 
 
 def decide(model, toggle, small_fast_model, headroom_url, bridge_url, codex_model) -> Route:
+    # Background/small-fast tasks always stay on Claude, even on the GPT path.
     # Prefix-tolerant so a date-suffixed small id (claude-sonnet-5-YYYYMMDD)
     # still routes to Claude and never bleeds onto the GPT/Codex path.
     if model == small_fast_model or model.startswith(small_fast_model + "-"):
         return Route(upstream=headroom_url, rewrite_model=None)
+    # Explicit GPT model (e.g. selected in /model) -> bridge, pass the exact id
+    # through unchanged. This is what lets one session mix Claude and GPT per
+    # request: no toggle flip, no rewrite, the picked model is what serves.
+    if model.startswith("gpt-"):
+        return Route(upstream=bridge_url, rewrite_model=None)
+    # Global-toggle fallback: a Claude model on the GPT path is rewritten to the
+    # resolved Codex model. Preserves the original gpt-toggle UX for setups that
+    # can't surface GPT ids in the /model picker.
     if toggle == "gpt":
         return Route(upstream=bridge_url, rewrite_model=codex_model)
     return Route(upstream=headroom_url, rewrite_model=None)
@@ -65,6 +74,14 @@ async def proxy(request: Request) -> Response:
     codex_model = read_model(MODEL_FILE, read_model(DEFAULT_FILE, CODEX_MODEL))
     route = decide(model, read_state(STATE_FILE), SMALL_FAST_MODEL,
                    HEADROOM_URL, BRIDGE_URL, codex_model)
+
+    # One line per request so it's clear which model actually served — the
+    # answer to "am I on Claude or GPT right now?". Shows the requested id, the
+    # served id (after any rewrite), and the upstream host.
+    dest = "gpt" if route.upstream == BRIDGE_URL else "claude"
+    served = route.rewrite_model or model or "(none)"
+    print(f"[route] requested={model or '(none)'} served={served} -> {dest}",
+          flush=True)
 
     out_body = body
     if route.rewrite_model and payload is not None:
