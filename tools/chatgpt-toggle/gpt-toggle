@@ -9,7 +9,7 @@ DEFAULT_MODEL="gpt-5.5"   # last-resort literal only; the good default comes fro
 # summarised before it exceeds the ChatGPT/Codex backend's context window.
 SETTINGS_FILE="${CLAUDE_SETTINGS_FILE:-$HOME/.claude/settings.json}"
 SAVED_WINDOW_FILE="${GPT_TOGGLE_SAVED_WINDOW_FILE:-$HOME/.config/chatgpt-toggle/saved-autocompact}"
-GPT_COMPACT_WINDOW="${GPT_TOGGLE_COMPACT_WINDOW:-120000}"
+GPT_COMPACT_WINDOW="${GPT_TOGGLE_COMPACT_WINDOW:-250000}"
 mkdir -p "$(dirname "$STATE_FILE")"
 
 # Set autoCompactWindow to $1 in settings.json, or remove it when $1 is empty.
