@@ -5,7 +5,31 @@ MODEL_FILE="${GPT_TOGGLE_MODEL_FILE:-$HOME/.config/chatgpt-toggle/model}"
 DEFAULT_FILE="${GPT_TOGGLE_DEFAULT_FILE:-$HOME/.config/chatgpt-toggle/model-default}"
 BRIDGE_URL="${BRIDGE_URL:-http://127.0.0.1:18765}"
 DEFAULT_MODEL="gpt-5.5"   # last-resort literal only; the good default comes from `refresh`
+# Claude Code auto-compacts earlier on the GPT path so a growing transcript is
+# summarised before it exceeds the ChatGPT/Codex backend's context window.
+SETTINGS_FILE="${CLAUDE_SETTINGS_FILE:-$HOME/.claude/settings.json}"
+SAVED_WINDOW_FILE="${GPT_TOGGLE_SAVED_WINDOW_FILE:-$HOME/.config/chatgpt-toggle/saved-autocompact}"
+GPT_COMPACT_WINDOW="${GPT_TOGGLE_COMPACT_WINDOW:-120000}"
 mkdir -p "$(dirname "$STATE_FILE")"
+
+# Set autoCompactWindow to $1 in settings.json, or remove it when $1 is empty.
+set_autocompact() {
+  local want="$1" tmp
+  command -v jq >/dev/null || { echo "gpt-toggle: jq not found; skipped autoCompactWindow change" >&2; return 0; }
+  [ -f "$SETTINGS_FILE" ] || echo '{}' > "$SETTINGS_FILE"
+  tmp="$(mktemp)"
+  if [ -n "$want" ]; then
+    jq --argjson w "$want" '.autoCompactWindow = $w' "$SETTINGS_FILE" > "$tmp"
+  else
+    jq 'del(.autoCompactWindow)' "$SETTINGS_FILE" > "$tmp"
+  fi
+  mv "$tmp" "$SETTINGS_FILE"
+}
+
+current_autocompact() {  # prints the current value, or "unset"
+  command -v jq >/dev/null || { echo unset; return; }
+  jq -r '.autoCompactWindow // "unset"' "$SETTINGS_FILE" 2>/dev/null || echo unset
+}
 
 available_gpt_models() {
   claude-code-proxy models 2>/dev/null | tr ',' '\n' | grep -oE 'gpt-[0-9a-z.-]+' | sort -u
@@ -24,11 +48,34 @@ active_model() {  # explicit override > resolved default > last-resort literal
 }
 
 case "${1:-status}" in
-  on)     echo gpt    > "$STATE_FILE"; echo "GPT path: ON  (main model → ChatGPT; small model stays on Claude)";;
-  off)    echo claude > "$STATE_FILE"; echo "GPT path: OFF (all → Claude via headroom)";;
+  on)
+    # Save the pre-GPT autoCompactWindow once (idempotent across repeat `on`s),
+    # then tighten it so the transcript compacts before the GPT backend rejects it.
+    if [ ! -f "$SAVED_WINDOW_FILE" ]; then
+      current_autocompact > "$SAVED_WINDOW_FILE"
+    fi
+    echo gpt > "$STATE_FILE"
+    set_autocompact "$GPT_COMPACT_WINDOW"
+    echo "GPT path: ON  (main model → ChatGPT; small model stays on Claude)"
+    echo "Auto-compact window: $GPT_COMPACT_WINDOW tokens (GPT-safe)"
+    ;;
+  off)
+    echo claude > "$STATE_FILE"
+    # Restore the saved window (unset → remove the key entirely).
+    if [ -f "$SAVED_WINDOW_FILE" ]; then
+      saved="$(cat "$SAVED_WINDOW_FILE")"
+      [ "$saved" = unset ] && set_autocompact "" || set_autocompact "$saved"
+      rm -f "$SAVED_WINDOW_FILE"
+    else
+      set_autocompact ""
+    fi
+    echo "GPT path: OFF (all → Claude via headroom)"
+    echo "Auto-compact window restored: $(current_autocompact)"
+    ;;
   status)
     s="$(cat "$STATE_FILE" 2>/dev/null || echo claude)"
     [ "$s" = gpt ] && echo "GPT path: ON (model: $(active_model))" || echo "GPT path: OFF"
+    echo "Auto-compact window: $(current_autocompact)"
     ;;
   refresh)
     best=""
