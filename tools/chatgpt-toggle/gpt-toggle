@@ -45,6 +45,24 @@ current_autocompact() {  # prints the current value, or "unset"
   jq -r '.autoCompactWindow // "unset"' "$SETTINGS_FILE" 2>/dev/null || echo unset
 }
 
+# Reasoning effort for all Codex/ChatGPT requests, forced via the bridge's
+# CCP_CODEX_EFFORT env var. The base unit ships a default; `gpt-toggle effort`
+# writes a systemd drop-in that overrides it (last Environment for a key wins).
+BRIDGE_UNIT="${GPT_TOGGLE_BRIDGE_UNIT:-chatgpt-bridge.service}"
+EFFORT_DROPIN="${GPT_TOGGLE_EFFORT_DROPIN:-$HOME/.config/systemd/user/$BRIDGE_UNIT.d/effort.conf}"
+
+current_effort() {  # ground truth = the running bridge's environment
+  local pid v
+  pid="$(systemctl --user show -p MainPID --value "$BRIDGE_UNIT" 2>/dev/null)"
+  if [ -n "$pid" ] && [ "$pid" != 0 ]; then
+    # /proc/<pid>/environ is briefly unreadable during a restart; the group
+    # redirect swallows the shell-level open error too, not just tr's stderr.
+    v="$( { tr '\0' '\n' < "/proc/$pid/environ"; } 2>/dev/null | sed -n 's/^CCP_CODEX_EFFORT=//p')"
+    [ -n "$v" ] && { echo "$v"; return; }
+  fi
+  echo "(bridge default)"
+}
+
 available_gpt_models() {
   claude-code-proxy models 2>/dev/null | tr ',' '\n' | grep -oE 'gpt-[0-9a-z.-]+' | sort -u
 }
@@ -96,6 +114,7 @@ case "${1:-status}" in
       echo "GPT path: OFF"
       echo "Auto-compact window: $(current_autocompact)"
     fi
+    echo "Reasoning effort: $(current_effort)"
     ;;
   refresh)
     best=""
@@ -132,6 +151,28 @@ case "${1:-status}" in
       echo "Auto-compact window: $win tokens (GPT-safe for $(active_model))"
     fi
     ;;
-  *) echo "usage: gpt-toggle {on|off|status|refresh|model [<name>|auto]}" >&2; exit 2;;
+  effort)
+    want="${2:-}"
+    if [ -z "$want" ]; then
+      echo "Reasoning effort (all GPT requests): $(current_effort)"
+      echo "Set: gpt-toggle effort <low|medium|xhigh|max>"
+      exit 0
+    fi
+    case "$want" in
+      low|medium|xhigh|max) ;;
+      *) echo "Invalid effort: $want  (choose low|medium|xhigh|max)" >&2; exit 2;;
+    esac
+    mkdir -p "$(dirname "$EFFORT_DROPIN")"
+    printf '[Service]\nEnvironment=CCP_CODEX_EFFORT=%s\n' "$want" > "$EFFORT_DROPIN"
+    systemctl --user daemon-reload
+    systemctl --user restart "$BRIDGE_UNIT"
+    # Wait briefly for the restarted bridge to expose the new env.
+    for _ in 1 2 3 4 5 6 7 8 9 10; do
+      [ "$(current_effort)" = "$want" ] && break; sleep 0.3
+    done
+    echo "Reasoning effort set to: $(current_effort)  (bridge restarted)"
+    exit 0
+    ;;
+  *) echo "usage: gpt-toggle {on|off|status|refresh|model [<name>|auto]|effort [<low|medium|xhigh|max>]}" >&2; exit 2;;
 esac
 echo "(takes effect on the next request — no need to restart claude)"

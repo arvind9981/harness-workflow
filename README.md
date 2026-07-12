@@ -124,9 +124,10 @@ titles, resume summaries) always stays on Claude â€” **Sonnet 5, never Haiku** â
 never spends your ChatGPT quota. **Linux/systemd only.**
 
 ```bash
-gpt-toggle on | off | status         # flip the main model, live (default: off)
-gpt-toggle model [<name> | auto]      # pick a ChatGPT model, or return to the dynamic default
-gpt-toggle refresh                    # re-resolve the newest model your plan offers
+gpt-toggle on | off | status              # flip the main model, live (default: off)
+gpt-toggle model [<name> | auto]          # pick a ChatGPT model, or return to the dynamic default
+gpt-toggle effort [<low|medium|xhigh|max>]  # reasoning effort for all GPT requests (restarts bridge)
+gpt-toggle refresh                        # re-resolve the newest model your plan offers
 ```
 
 **How it works.** `init.sh` installs three systemd user services:

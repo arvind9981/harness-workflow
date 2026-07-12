@@ -621,6 +621,7 @@ ${c_grn}Done.${c_rst}
   ----------------------------------------------------------------------
      ${c_dim}gpt-toggle on | off | status${c_rst}         flip the main model, live
      ${c_dim}gpt-toggle model [<name> | auto]${c_rst}     pick a model / dynamic default
+     ${c_dim}gpt-toggle effort [<low..max>]${c_rst}       reasoning effort, all GPT requests
      ${c_dim}gpt-toggle refresh${c_rst}                   re-resolve newest available
 
   ${c_grn}Next${c_rst}
