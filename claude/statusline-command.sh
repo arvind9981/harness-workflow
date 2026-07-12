@@ -127,11 +127,22 @@ ctx_used=$(_jq '.context_window.total_input_tokens // empty')
 ctx_total=$(_jq '.context_window.context_window_size // empty')
 rem_pct=$(_jq '.context_window.remaining_percentage // empty')
 
+# Window capacity as a compact tag: 1000000 → 1M, 200000 → 200K.
+fmt_cap() {
+  awk -v n="$1" 'BEGIN {
+    if (n >= 1000000)   { v=n/1000000; printf (v==int(v) ? "%dM" : "%.1fM"), v }
+    else if (n >= 1000) { v=n/1000;    printf (v==int(v) ? "%dK" : "%.1fK"), v }
+    else                { printf "%d", n }
+  }'
+}
+
 ctx_chip=""
 if [ -n "$rem_pct" ] && [ -n "$ctx_total" ]; then
   rem_int=$(printf '%.0f' "$rem_pct")
   IFS='|' read -r bg fg <<< "$(stateful "$rem_int" "$CTX_OK")"
-  label=" ctx ${rem_int}% "
+  # Normal: show % left plus the window capacity (· 1M). When critical (≤10%),
+  # swap the capacity tag for the more urgent tokens-remaining readout.
+  label=" ctx ${rem_int}% · $(fmt_cap "$ctx_total") "
   if [ "$rem_int" -le 10 ] && [ -n "$ctx_used" ]; then
     label=" ctx ${rem_int}% · $(fmt_k "$(( ctx_total - ctx_used ))") left "
   fi
