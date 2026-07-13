@@ -31,6 +31,10 @@ Environment:
   GRAPHIFY_EXTRA_REPOS    Colon-separated repo paths added to the reseed list.
                           Example:
 GRAPHIFY_EXTRA_REPOS="$HOME/app:$HOME/api" ./init.sh
+  CODEX_WINDOWS_DIR       Windows Codex home as a WSL path when auto-detection
+                          is ambiguous (for example /mnt/c/Users/me/.codex).
+  CODEX_WSL_DISTRO        WSL distro name used by Windows Codex hook/MCP commands
+                          when WSL_DISTRO_NAME is unavailable.
 
 Default:
   With no graphify repos configured, init tracks this claude-workflow repo only.
@@ -63,7 +67,12 @@ done
 # ---------------------------------------------------------------------------
 REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 STAMP="$(date +%Y%m%d-%H%M%S)"
-OS="$(uname -s)"                           # Linux | Darwin
+source "$REPO_DIR/tools/codex/platform.sh"
+if ! codex_detect_platform; then
+  printf 'init.sh: %s\n' "$PLATFORM_ERROR" >&2
+  exit 1
+fi
+OS="$PLATFORM_OS"                          # Linux | Darwin
 CLAUDE_DIR="$HOME/.claude"
 BIN_DIR="$HOME/.local/bin"
 UNIT_DIR="$HOME/.config/systemd/user"      # systemd user units (Linux)
@@ -133,8 +142,7 @@ svc_enable() {  # svc_enable <linux_unit_file> <mac_plist_file> — install + st
 }
 
 detect_windows_codex_dir() {  # Print the Windows Codex home as a WSL path, if unambiguous.
-  [ "$OS" = "Linux" ] || return 1
-  [ -n "${WSL_DISTRO_NAME:-}" ] || [ -e /proc/sys/fs/binfmt_misc/WSLInterop ] || return 1
+  [ "$IS_WSL" = 1 ] || return 1
 
   if [ -n "${CODEX_WINDOWS_DIR:-}" ]; then
     printf '%s\n' "$CODEX_WINDOWS_DIR"
@@ -176,7 +184,7 @@ install_windows_codex_bridge() {  # Bridge portable Codex workflow pieces into t
   dest="$windows_codex_dir/hooks.json"
 
   sed "s#__HOME__#$HOME#g" "$source_json" > "$linux_rendered"
-  if ! jq --arg distro "$WSL_DISTRO_NAME" '
+  if ! jq --arg distro "$WSL_DISTRO" '
       .hooks |= with_entries(
         .value |= map(
           .hooks |= map(
@@ -200,7 +208,7 @@ install_windows_codex_bridge() {  # Bridge portable Codex workflow pieces into t
     backup "$dest"
     install -m 0644 "$windows_rendered" "$dest"
     rm -f "$windows_rendered"
-    ok "Windows Codex App hooks -> $dest (WSL distro: $WSL_DISTRO_NAME)"
+    ok "Windows Codex App hooks -> $dest (WSL distro: $WSL_DISTRO)"
   fi
 
   agents_dest="$windows_codex_dir/AGENTS.md"
@@ -230,7 +238,7 @@ install_windows_codex_bridge() {  # Bridge portable Codex workflow pieces into t
   config="$windows_codex_dir/config.toml"
   rendered_config="$(mktemp "${TMPDIR:-/tmp}/codex-windows-config.XXXXXX")"
   touch "$config"
-  if ! python3 - "$config" "$rendered_config" "$WSL_DISTRO_NAME" \
+  if ! python3 - "$config" "$rendered_config" "$WSL_DISTRO" \
       "$HOME/.local/bin/mempalace-mcp" "$HOME/.mempalace/palace" <<'PY'
 import json
 import sys
@@ -459,9 +467,11 @@ if command -v codex >/dev/null 2>&1 || [ -n "$WINDOWS_CODEX_DIR" ]; then
     warn "Codex workflow installed; doctor reported local follow-up"
   fi
   ok "Codex detected — hooks/instructions migrated into ~/.codex"
-  if [ -n "$WINDOWS_CODEX_DIR" ]; then
+  if [ -n "$WINDOWS_CODEX_DIR" ] && [ -n "$WSL_DISTRO" ]; then
     install_windows_codex_bridge "$WINDOWS_CODEX_DIR" || warn "Windows Codex App bridge needs local follow-up"
-  elif [ -n "${WSL_DISTRO_NAME:-}" ] || [ -e /proc/sys/fs/binfmt_misc/WSLInterop ]; then
+  elif [ "$IS_WSL" = 1 ] && [ -z "$WSL_DISTRO" ]; then
+    warn "WSL detected without a distro name; set CODEX_WSL_DISTRO and re-run init.sh for the Windows Codex bridge"
+  elif [ "$IS_WSL" = 1 ]; then
     warn "WSL detected but the Windows Codex home was ambiguous; set CODEX_WINDOWS_DIR and re-run init.sh"
   fi
 else
