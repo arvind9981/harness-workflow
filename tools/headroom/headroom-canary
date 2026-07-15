@@ -1,0 +1,19 @@
+#!/usr/bin/env bash
+
+# Opt-in lossless compression canary. It never replaces the default :8787 proxy.
+set -euo pipefail
+
+port="${HEADROOM_CANARY_PORT:-8788}"
+host="${HEADROOM_CANARY_HOST:-127.0.0.1}"
+log_dir="${HEADROOM_CANARY_LOG_DIR:-$HOME/.headroom/logs}"
+mkdir -p "$log_dir"
+
+exec headroom proxy \
+  --host "$host" \
+  --port "$port" \
+  --mode token \
+  --no-cache \
+  --intercept-tool-results \
+  --lossless \
+  --no-subscription-tracking \
+  --log-file "$log_dir/canary.jsonl"

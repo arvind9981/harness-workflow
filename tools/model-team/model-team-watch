@@ -7,29 +7,78 @@ INTERVAL=2
 ONCE=0
 JSON_OUTPUT=0
 REPO="$PWD"
+REPO_EXPLICIT=0
+STATE_DIR="${MODEL_TEAM_STATE_DIR:-${XDG_STATE_HOME:-$HOME/.local/state}/model-team/runs}"
+STATE_FILE="${MODEL_TEAM_STATE_FILE:-}"
+RUN_ID="${MODEL_TEAM_RUN_ID:-$PPID}"
+WORKER_STATE_DIR="${MODEL_TEAM_WORKER_STATE_DIR:-${XDG_STATE_HOME:-$HOME/.local/state}/model-team/workers}"
+MAX_REFRESHES="${MODEL_TEAM_MAX_REFRESHES:-0}"
+MARK_PHASE=""
+MARK_ACTOR=""
+MARK_TASK=""
+MARK_RESULT=""
+CLEAR_STATE=0
 
 usage() {
   printf 'Usage: %s [--once] [--json] [--repo PATH] [-n SECONDS]\n' "$0"
+  printf '       %s --mark PHASE [--actor NAME] [--task ID] [--result STATUS]\n' "$0"
+  printf '       %s --clear-state\n' "$0"
 }
 
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --once) ONCE=1; shift ;;
     --json) JSON_OUTPUT=1; ONCE=1; shift ;;
-    --repo) REPO="${2:?--repo needs a path}"; shift 2 ;;
+    --repo) REPO="${2:?--repo needs a path}"; REPO_EXPLICIT=1; shift 2 ;;
+    --mark) MARK_PHASE="${2:?--mark needs a phase}"; shift 2 ;;
+    --actor) MARK_ACTOR="${2:?--actor needs a name}"; shift 2 ;;
+    --task) MARK_TASK="${2:?--task needs an id}"; shift 2 ;;
+    --result) MARK_RESULT="${2:?--result needs a status}"; shift 2 ;;
+    --clear-state) CLEAR_STATE=1; shift ;;
     -n|--interval) INTERVAL="${2:?-n needs a value}"; shift 2 ;;
     -h|--help) usage; exit 0 ;;
     *) printf 'unknown arg: %s\n' "$1" >&2; usage >&2; exit 2 ;;
   esac
 done
 
-read_stats() {
-  if [ -n "${MODEL_TEAM_STATS_FILE:-}" ]; then
-    cat "$MODEL_TEAM_STATS_FILE"
-  else
-    curl -fsS --max-time 4 "$URL/stats" 2>/dev/null
+case "$RUN_ID" in
+  ''|*[!A-Za-z0-9._-]*) printf 'invalid MODEL_TEAM_RUN_ID: %s\n' "$RUN_ID" >&2; exit 2 ;;
+esac
+if [ -z "$STATE_FILE" ] && { [ -n "$MARK_PHASE" ] || [ "$CLEAR_STATE" = 1 ] || [ -n "${MODEL_TEAM_RUN_ID:-}" ]; }; then
+  STATE_FILE="$STATE_DIR/$RUN_ID.json"
+fi
+
+write_state() {
+  local now started_at tmp
+  case "$MARK_PHASE" in
+    planning|reconnaissance|implementation|review|repair|verification|complete|failed) ;;
+    *) printf 'invalid model-team phase: %s\n' "$MARK_PHASE" >&2; exit 2 ;;
+  esac
+  now="$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
+  started_at="$now"
+  if [ "$MARK_PHASE" != planning ] && [ -f "$STATE_FILE" ]; then
+    started_at="$(jq -r '.started_at // empty' "$STATE_FILE" 2>/dev/null || true)"
+    [ -n "$started_at" ] || started_at="$now"
   fi
+  mkdir -p "$(dirname "$STATE_FILE")"
+  tmp="$(mktemp "${STATE_FILE}.XXXXXX")"
+  jq -n --arg phase "$MARK_PHASE" --arg actor "$MARK_ACTOR" \
+    --arg task "$MARK_TASK" --arg result "$MARK_RESULT" \
+    --arg started_at "$started_at" --arg updated_at "$now" \
+    '{phase: $phase, actor: $actor, task: $task, result: $result,
+      started_at: $started_at, updated_at: $updated_at}' > "$tmp"
+  chmod 0600 "$tmp"
+  mv "$tmp" "$STATE_FILE"
 }
+
+if [ "$CLEAR_STATE" = 1 ]; then
+  [ -z "$STATE_FILE" ] || rm -f "$STATE_FILE"
+  exit 0
+fi
+if [ -n "$MARK_PHASE" ]; then
+  write_state
+  exit 0
+fi
 
 read_health() {
   if [ -n "${MODEL_TEAM_HEALTH_FILE:-}" ]; then
@@ -37,6 +86,23 @@ read_health() {
   else
     curl -fsS --max-time 4 "$URL/health" 2>/dev/null
   fi
+}
+
+read_worker_states() {
+  local processes="$1" path pid uptime
+  [ -d "$WORKER_STATE_DIR" ] || return 0
+  for path in "$WORKER_STATE_DIR"/*.json; do
+    [ -f "$path" ] || continue
+    pid="$(jq -r '.server_pid // empty' "$path" 2>/dev/null || true)"
+    case "$pid" in
+      ''|*[!0-9]*) continue ;;
+    esac
+    uptime="$(printf '%s\n' "$processes" | awk -v pid="$pid" '
+      $1 == pid && index($0, "codex-worker-mcp") {print $2; exit}
+    ')"
+    [ -n "$uptime" ] || continue
+    jq -c --arg uptime "$uptime" '. + {process_uptime: $uptime}' "$path" 2>/dev/null || true
+  done
 }
 
 read_processes() {
@@ -47,40 +113,61 @@ read_processes() {
   fi
 }
 
-snapshot() {
-  local stats health processes worker_line worker_up=false worker_pid=0 worker_uptime=""
-  local activity headroom_healthy=false branch="" changed_files=0 repo_valid=false status_lines=""
+read_state() {
+  if [ -n "$STATE_FILE" ] && [ -f "$STATE_FILE" ]; then
+    jq -c '{
+      phase: (.phase // "idle"), actor: (.actor // ""), task: (.task // ""),
+      result: (.result // ""), started_at: (.started_at // ""),
+      updated_at: (.updated_at // "")
+    }' "$STATE_FILE" 2>/dev/null || true
+  elif [ -d "$STATE_DIR" ]; then
+    jq -sc 'map(select(type == "object")) | sort_by(.updated_at // "") | last // empty |
+      {phase: (.phase // "idle"), actor: (.actor // ""), task: (.task // ""),
+       result: (.result // ""), started_at: (.started_at // ""),
+       updated_at: (.updated_at // "")}' "$STATE_DIR"/*.json 2>/dev/null || true
+  fi
+}
 
-  stats="$(read_stats || true)"
+snapshot() {
+  local health processes worker_states worker worker_repo
+  local orchestration headroom_healthy=false branch="" changed_files=0 repo_valid=false status_lines=""
+
   health="$(read_health || true)"
   processes="$(read_processes || true)"
-  worker_line="$(printf '%s\n' "$processes" | awk '
-    index($0, "codex mcp-server") && index($0, "mcp_servers.MCP_DOCKER.enabled=false") {print; exit}
-  ')"
-  if [ -n "$worker_line" ]; then
-    worker_up=true
-    worker_pid="$(printf '%s\n' "$worker_line" | awk '{print $1}')"
-    worker_uptime="$(printf '%s\n' "$worker_line" | awk '{print $2}')"
+  orchestration="$(read_state || true)"
+  [ -n "$orchestration" ] \
+    || orchestration='{"phase":"idle","actor":"","task":"","result":"","started_at":"","updated_at":""}'
+  worker_states="$(read_worker_states "$processes" || true)"
+  worker='{"available":false,"status":"down","server_count":0,"servers":[],"active_calls":[],"latest":null}'
+  if [ -n "$worker_states" ]; then
+    worker="$(printf '%s\n' "$worker_states" | jq -sc '
+      def epoch:
+        try (sub("\\.[0-9]+Z$"; "Z") | fromdateiso8601) catch 0;
+      . as $states
+      | ([$states[].active_calls[]?]
+      | map(. + {
+          elapsed_seconds: (if (.started_at // "" | epoch) == 0 then 0
+            else ([0, (now - (.started_at | epoch) | floor)] | max) end)
+        })) as $active
+      | ([$states[].latest | select(. != null)]
+      | sort_by(.completed_at) | last // null) as $latest
+      | {
+          available: true,
+          status: (if ($active | length) > 0 then "active"
+            elif $latest != null then "idle" else "ready" end),
+          server_count: ($states | length),
+          servers: ($states | map({pid: .server_pid, uptime: .process_uptime,
+            started_at: .server_started_at})),
+          active_calls: $active,
+          latest: $latest
+        }
+    ' 2>/dev/null || printf '%s' "$worker")"
   fi
 
-  activity='{"model":"","client":"","timestamp":"","latency_ms":0,"requests_5m":0}'
-  if [ -n "$stats" ]; then
-    activity="$(printf '%s' "$stats" | jq -c '
-      def epoch: try (sub("\\.[0-9]+$"; "Z") | fromdateiso8601) catch 0;
-      [.request_logs[]? | select((.tags.client // "") == "codex")] as $requests
-      | ($requests | sort_by(.timestamp) | last // {}) as $latest
-      | ($latest.timestamp // "" | epoch) as $latest_epoch
-      | {
-          model: ($latest.model // ""),
-          client: ($latest.tags.client // ""),
-          timestamp: ($latest.timestamp // ""),
-          latency_ms: ($latest.total_latency_ms // 0),
-          requests_5m: (if $latest_epoch == 0 then 0 else
-            ([$requests[] | select((.timestamp | epoch) >= ($latest_epoch - 300))]
-             | unique_by(.request_id) | length)
-          end)
-        }
-    ' 2>/dev/null || printf '%s' "$activity")"
+  if [ "$REPO_EXPLICIT" = 0 ]; then
+    worker_repo="$(printf '%s' "$worker" | jq -r \
+      '.active_calls[0].cwd // .latest.cwd // empty' 2>/dev/null || true)"
+    [ -z "$worker_repo" ] || REPO="$worker_repo"
   fi
 
   if [ -n "$health" ] && printf '%s' "$health" \
@@ -99,14 +186,14 @@ snapshot() {
   fi
 
   jq -n \
-    --argjson worker_up "$worker_up" --argjson worker_pid "$worker_pid" \
-    --arg worker_uptime "$worker_uptime" --argjson activity "$activity" \
+    --argjson worker "$worker" \
+    --argjson orchestration "$orchestration" \
     --argjson headroom_healthy "$headroom_healthy" --arg headroom_url "$URL" \
     --argjson repo_valid "$repo_valid" --arg repo_path "$REPO" --arg branch "$branch" \
     --argjson changed_files "$changed_files" --arg status "$status_lines" '
       {
-        worker: {up: $worker_up, pid: $worker_pid, uptime: $worker_uptime},
-        activity: $activity,
+        worker: $worker,
+        orchestration: $orchestration,
         headroom: {healthy: $headroom_healthy, url: $headroom_url},
         repository: {
           valid: $repo_valid,
@@ -123,17 +210,32 @@ render_text() {
   printf '\033[1m  model-team watcher\033[0m\n'
   printf '  ────────────────────────────────────────────────\n'
   printf '%s' "$data" | jq -r '
-    "  codex-worker  " + (if .worker.up then "UP · pid \(.worker.pid) · up \(.worker.uptime)" else "DOWN" end),
-    (if (.activity.model | length) > 0 then
-       "  latest request  \(.activity.model) · client \(.activity.client) · \(.activity.timestamp | capture("T(?<time>[0-9:]+)").time) · \((.activity.latency_ms / 1000 * 10 | round) / 10)s · \(.activity.requests_5m) requests/5m"
-     else "  latest request  —" end),
+    "  codex-worker  " + (.worker.status | ascii_upcase) +
+      (if .worker.available then
+        " · \(.worker.server_count) MCP server" +
+        (if .worker.server_count == 1 then " · pid \(.worker.servers[0].pid)" else "s" end)
+       else "" end),
+    (if .orchestration.phase != "idle" then
+       "  orchestration  \(.orchestration.phase)" +
+       (if (.orchestration.actor | length) > 0 then " · \(.orchestration.actor)" else "" end) +
+       (if (.orchestration.task | length) > 0 then " · \(.orchestration.task)" else "" end) +
+       (if (.orchestration.result | length) > 0 then " · \(.orchestration.result)" else "" end)
+     else "  orchestration  idle" end),
+    (.worker.active_calls[]? |
+      "  active call    \(.tool) · \(.model) · \(.elapsed_seconds)s" +
+      (if (.cwd | length) > 0 then " · \(.cwd)" else "" end)),
+    (if .worker.latest != null then
+       "  last worker call  \(.worker.latest.model) · \(.worker.latest.tool) · \(.worker.latest.status) · " +
+       "\(.worker.latest.completed_at | capture("T(?<time>[0-9:]+)").time) · " +
+       "\((.worker.latest.latency_ms / 1000 * 10 | round) / 10)s"
+     else "  last worker call  —" end),
     "  headroom      " + (if .headroom.healthy then "healthy" else "unavailable" end),
     (if .repository.valid then
        "  repository    \(.repository.branch // "detached") · changed files  \(.repository.changed_files)"
      else "  repository    not a Git worktree" end),
     (.repository.status[:8][]? | "    \(.)")
   '
-  printf '\n  \033[2mServer UP means available; request activity is the latest completed Headroom observation.\033[0m\n'
+  printf '\n  \033[2mACTIVE means an instrumented worker call is in flight; READY and IDLE are not working.\033[0m\n'
 }
 
 run_once() {
@@ -151,11 +253,22 @@ if [ "$ONCE" = 1 ]; then
   exit 0
 fi
 
-trap 'printf "\033[?25h\n"; exit 0' INT TERM
+trap 'exit 0' INT TERM
+trap 'printf "\033[?25h\n"' EXIT
 printf '\033[?25l'
+refreshes=0
 while true; do
-  printf '\033[2J\033[H'
-  printf '  \033[2m%s  (every %ss, Ctrl-C to quit)\033[0m\n' "$(date '+%H:%M:%S')" "$INTERVAL"
-  run_once
+  frame="$({
+    printf '  \033[2m%s  (every %ss, Ctrl-C to quit)\033[0m\n' "$(date '+%H:%M:%S')" "$INTERVAL"
+    run_once
+  })"
+  if [ "$refreshes" -eq 0 ]; then
+    printf '\033[2J'
+  fi
+  printf '\033[H%s\n\033[J' "$frame"
+  refreshes=$((refreshes + 1))
+  if [ "$MAX_REFRESHES" -gt 0 ] && [ "$refreshes" -ge "$MAX_REFRESHES" ]; then
+    break
+  fi
   sleep "$INTERVAL"
 done

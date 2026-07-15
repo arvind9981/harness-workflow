@@ -8,6 +8,7 @@ import argparse
 import json
 import selectors
 import subprocess
+import sys
 import time
 
 
@@ -42,16 +43,25 @@ def wait_for_id(
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--codex-bin", required=True)
+    parser.add_argument("--worker-wrapper")
+    parser.add_argument("--state-dir")
     parser.add_argument("--timeout", type=float, default=10.0)
     args = parser.parse_args()
 
-    process = subprocess.Popen(
-        [
+    if args.worker_wrapper:
+        command = [sys.executable, args.worker_wrapper, "--codex-bin", args.codex_bin]
+        if args.state_dir:
+            command.extend(["--state-dir", args.state_dir])
+    else:
+        command = [
             args.codex_bin,
             "mcp-server",
             "-c",
             "mcp_servers.MCP_DOCKER.enabled=false",
-        ],
+        ]
+
+    process = subprocess.Popen(
+        command,
         stdin=subprocess.PIPE,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,

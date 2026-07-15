@@ -4,6 +4,7 @@
 set -u
 
 REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+# shellcheck disable=SC1091
 . "$REPO_DIR/tools/codex/lib.sh"
 CODEX_DIR="${CODEX_DIR:-$HOME/.codex}"
 CONF="${GRAPHIFY_REPOS_CONF:-$HOME/.mempalace/graphify-repos.conf}"
@@ -37,10 +38,11 @@ fail() {
   printf 'FAIL %s\n' "$1"
 }
 
-docker_fail() {
-  FAIL=$((FAIL + 1))
+docker_warn() {
+  WARN=$((WARN + 1))
   NEED_DOCKER=1
-  printf 'FAIL %s\n' "$1"
+  NEXT_ACTION="Configure or repair optional Docker MCP support before using external-service workflows."
+  printf 'WARN %s\n' "$1"
 }
 
 graphify_fail() {
@@ -209,6 +211,8 @@ check_codex_config() {
   MCP_COMMAND=""
   MCP_PROFILE=""
   MCP_TIMEOUT=""
+  MCP_DYNAMIC=""
+  MCP_PRESENT=""
 
   if [ ! -f "$config" ]; then
     fail "$config missing"
@@ -238,6 +242,11 @@ for index, arg in enumerate(args):
     if isinstance(arg, str) and arg.startswith("--profile="):
         profile = arg.split("=", 1)[1]
         break
+dynamic = any(
+    arg == "--tools=mcp-exec"
+    or (arg == "--tools" and index + 1 < len(args) and args[index + 1] == "mcp-exec")
+    for index, arg in enumerate(args)
+)
 
 safe = {
     "native_openai": config.get("openai_base_url", ""),
@@ -247,6 +256,8 @@ safe = {
     "mcp_command": docker.get("command", ""),
     "mcp_profile": profile,
     "mcp_timeout": docker.get("startup_timeout_sec", ""),
+    "mcp_dynamic": str(dynamic).lower(),
+    "mcp_present": str(bool(docker)).lower(),
 }
 for key, value in safe.items():
     print(f"{key}\t{value}")
@@ -265,6 +276,8 @@ PY
       mcp_command) MCP_COMMAND="$value" ;;
       mcp_profile) MCP_PROFILE="$value" ;;
       mcp_timeout) MCP_TIMEOUT="$value" ;;
+      mcp_dynamic) MCP_DYNAMIC="$value" ;;
+      mcp_present) MCP_PRESENT="$value" ;;
     esac
   done <<EOF
 $parsed
@@ -294,6 +307,11 @@ EOF
     fail "Codex shell environment inheritance is not all"
   fi
 
+  if [ "$MCP_PRESENT" != true ]; then
+    pass "MCP_DOCKER configuration omitted (optional)"
+    return
+  fi
+
   case "$MCP_TIMEOUT" in
     ''|*[!0-9]*) fail "MCP_DOCKER startup timeout is missing or invalid" ;;
     *)
@@ -304,6 +322,12 @@ EOF
       fi
       ;;
   esac
+
+  if [ "$MCP_DYNAMIC" = true ]; then
+    pass "MCP_DOCKER uses dynamic gateway mode"
+  else
+    warn "MCP_DOCKER eagerly exposes its profile tool catalog"
+  fi
 }
 
 check_mcp_docker() {
@@ -311,87 +335,97 @@ check_mcp_docker() {
 
   codex_bin="$(codex_resolve_bin || true)"
   if [ -z "$codex_bin" ]; then
-    docker_fail "Codex executable not found"
+    fail "Codex executable not found"
     return
   fi
   pass "Codex executable resolved: $codex_bin"
 
+  if [ "$MCP_PRESENT" != true ]; then
+    docker_warn "MCP_DOCKER is not configured (optional)"
+    return
+  fi
+
   if [ -z "$PYTHON_BIN" ]; then
-    docker_fail "Python 3.11+ with tomllib is required for bounded MCP checks"
+    docker_warn "Python 3.11+ with tomllib is required for bounded MCP checks"
     return
   fi
 
   codex_mcp="$(run_bounded 20 "$codex_bin" mcp list 2>&1)"
   command_rc=$?
   if [ "$command_rc" -ne 0 ]; then
-    docker_fail "Codex MCP list failed"
+    docker_warn "Codex MCP list failed"
     return
   fi
   if printf '%s\n' "$codex_mcp" | grep -F 'MCP_DOCKER' | grep -Eqi 'enabled|true'; then
     pass "MCP_DOCKER enabled in Codex"
   else
-    docker_fail "MCP_DOCKER is not enabled in Codex"
+    docker_warn "MCP_DOCKER is not enabled in Codex"
+    return
   fi
 
   if [ "$MCP_COMMAND" != "docker" ]; then
-    docker_fail "MCP_DOCKER command is not docker"
+    docker_warn "MCP_DOCKER command is not docker"
     return
   fi
   if [ -z "$MCP_PROFILE" ]; then
-    docker_fail "MCP_DOCKER has no configured profile"
+    docker_warn "MCP_DOCKER has no configured profile"
     return
   fi
   if ! have docker; then
-    docker_fail "docker missing"
+    docker_warn "docker missing"
     return
   fi
 
   profiles="$(run_bounded 20 docker mcp profile list 2>&1)"
   command_rc=$?
   if [ "$command_rc" -ne 0 ]; then
-    docker_fail "Docker MCP profile lookup failed"
+    docker_warn "Docker MCP profile lookup failed"
     return
   fi
   if printf '%s\n' "$profiles" | grep -Fq "$MCP_PROFILE"; then
     pass "Docker MCP profile available: $MCP_PROFILE"
   else
-    docker_fail "Docker MCP profile unavailable: $MCP_PROFILE"
+    docker_warn "Docker MCP profile unavailable: $MCP_PROFILE"
+    return
   fi
 
   servers="$(run_bounded 20 docker mcp profile server ls --filter "profile=$MCP_PROFILE" 2>&1)"
   command_rc=$?
   if [ "$command_rc" -ne 0 ]; then
-    docker_fail "Docker MCP server lookup failed"
+    docker_warn "Docker MCP server lookup failed"
     return
   fi
   if printf '%s\n' "$servers" | grep -Fqi 'atlassian'; then
     pass "Atlassian server enabled in profile: $MCP_PROFILE"
   else
-    docker_fail "Atlassian server is not enabled in profile: $MCP_PROFILE"
+    docker_warn "Atlassian server is not enabled in profile: $MCP_PROFILE"
+    return
   fi
 
-  tool_count_output="$(run_bounded 30 docker mcp tools count "--gateway-arg=--profile=$MCP_PROFILE" 2>&1)"
+  tool_count_output="$(run_bounded 30 docker mcp tools count \
+    "--gateway-arg=--profile=$MCP_PROFILE" "--gateway-arg=--tools=mcp-exec" 2>&1)"
   command_rc=$?
   if [ "$command_rc" -ne 0 ]; then
-    docker_fail "Docker MCP tool count failed"
+    docker_warn "Docker MCP tool count failed"
     return
   fi
   tool_count="$(printf '%s\n' "$tool_count_output" | awk '{for (i=1; i<=NF; i++) if ($i ~ /^[0-9]+$/) {print $i; exit}}')"
   case "$tool_count" in
-    ''|0|*[!0-9]*) docker_fail "Docker MCP gateway returned no tools for profile: $MCP_PROFILE" ;;
-    *) pass "Docker MCP gateway exposes $tool_count tools" ;;
+    ''|0|*[!0-9]*) docker_warn "Docker MCP dynamic gateway returned no management tools" ;;
+    *) pass "Docker MCP dynamic gateway exposes $tool_count management tools" ;;
   esac
 
-  tools="$(run_bounded 30 docker mcp tools ls --format=list "--gateway-arg=--profile=$MCP_PROFILE" 2>&1)"
+  tools="$(run_bounded 30 docker mcp tools ls --format=list \
+    "--gateway-arg=--profile=$MCP_PROFILE" "--gateway-arg=--tools=mcp-exec" 2>&1)"
   command_rc=$?
   if [ "$command_rc" -ne 0 ]; then
-    docker_fail "Docker MCP tool listing failed"
+    docker_warn "Docker MCP tool listing failed"
     return
   fi
-  if printf '%s\n' "$tools" | grep -Eq '(^|[[:space:]])jira_[[:alnum:]_]+'; then
-    pass "Docker MCP gateway exposes Jira tools"
+  if printf '%s\n' "$tools" | grep -Fq 'mcp-exec'; then
+    pass "Docker MCP dynamic gateway includes mcp-exec"
   else
-    docker_fail "Docker MCP gateway exposes no Jira tools"
+    docker_warn "Docker MCP dynamic gateway does not include mcp-exec"
   fi
 }
 
