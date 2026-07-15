@@ -128,6 +128,12 @@ esac
 SH
   chmod +x "$fake_bin/docker"
 
+  cat > "$fake_bin/claude" <<'SH'
+#!/usr/bin/env bash
+exit 0
+SH
+  chmod +x "$fake_bin/claude"
+
   printf '%s\n' '<!-- claude-workflow: managed opencode consult agent -->' > "$config/agents/consult.md"
   printf '%s\n' '<!-- claude-workflow: managed opencode consult command -->' > "$config/commands/consult.md"
   git -C "$REPO_DIR" show HEAD:opencode/plugins/workflow.ts > "$config/plugins/workflow.ts"
@@ -176,7 +182,7 @@ SH
   assert_absent "$claude_dir/agents/opencode-model-team.md"
   assert_file "$bin_dir/claude-worker-mcp"
 
-  jq -e '
+  jq -e --arg claude_bin "$fake_bin/claude" '
     .model == "openai/gpt-5.6-sol" and
     .small_model == "openai/gpt-5.6-luna" and
     .plugin == ["keep-me"] and
@@ -187,6 +193,7 @@ SH
     .mcp.personal.command == ["personal-mcp"] and
     .mcp.MCP_DOCKER.command == ["docker", "mcp", "gateway", "run", "--profile", "portable-test", "--tools", "mcp-exec"] and
     .mcp["claude-worker"].command[0] != null and
+    .mcp["claude-worker"].command[3] == $claude_bin and
     .mcp["claude-worker"].environment.ANTHROPIC_BASE_URL == "http://127.0.0.1:8787" and
     .tools["claude-worker_*"] == false and
     .tools["mempalace_*"] == false and
