@@ -4,6 +4,7 @@ set -euo pipefail
 
 REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 # shellcheck source=tools/codex/lib.sh
+# shellcheck disable=SC1091
 . "$REPO_DIR/tools/codex/lib.sh"
 
 CLAUDE_DIR="${CLAUDE_DIR:-$HOME/.claude}"
@@ -38,10 +39,14 @@ fi
 
 install_if_changed "$REPO_DIR/claude/skills/model-team/SKILL.md" \
   "$CLAUDE_DIR/skills/model-team/SKILL.md" 0644
+install_if_changed "$REPO_DIR/claude/agents/model-team-architect.md" \
+  "$CLAUDE_DIR/agents/model-team-architect.md" 0644
 install_if_changed "$REPO_DIR/workflow/skills/jira-live/SKILL.md" \
   "$CLAUDE_DIR/skills/jira-live/SKILL.md" 0644
 install_if_changed "$REPO_DIR/tools/model-team/model-team-watch" \
   "$BIN_DIR/model-team-watch" 0755
+install_if_changed "$REPO_DIR/tools/model-team/codex-worker-mcp" \
+  "$BIN_DIR/codex-worker-mcp" 0755
 
 mkdir -p "$(dirname "$CLAUDE_CONFIG_FILE")"
 if [ ! -e "$CLAUDE_CONFIG_FILE" ]; then
@@ -55,7 +60,7 @@ if [ -z "$python_bin" ]; then
 fi
 
 MODEL_TEAM_BACKUP_SUFFIX=".bak-model-team-$STAMP" "$python_bin" - \
-  "$CLAUDE_CONFIG_FILE" "$codex_bin" <<'PY'
+  "$CLAUDE_CONFIG_FILE" "$python_bin" "$BIN_DIR/codex-worker-mcp" "$codex_bin" <<'PY'
 import json
 import os
 import shutil
@@ -65,7 +70,9 @@ import tempfile
 from pathlib import Path
 
 path = Path(sys.argv[1])
-codex_bin = sys.argv[2]
+python_bin = sys.argv[2]
+worker_wrapper = sys.argv[3]
+codex_bin = sys.argv[4]
 text = path.read_text(encoding="utf-8")
 try:
     config = json.loads(text or "{}")
@@ -78,13 +85,37 @@ servers = config.setdefault("mcpServers", {})
 if not isinstance(servers, dict):
     raise SystemExit(f"install-model-team: {path}.mcpServers must be a JSON object")
 desired = {
-    "command": codex_bin,
-    "args": ["mcp-server", "-c", "mcp_servers.MCP_DOCKER.enabled=false"],
+    "command": python_bin,
+    "args": [worker_wrapper, "--codex-bin", codex_bin],
 }
-if servers.get("codex-worker") == desired:
-    raise SystemExit(0)
+changed = False
+if servers.get("codex-worker") != desired:
+    servers["codex-worker"] = desired
+    changed = True
 
-servers["codex-worker"] = desired
+docker = servers.get("MCP_DOCKER")
+if isinstance(docker, dict) and docker.get("command") == "docker":
+    args = docker.get("args")
+    if isinstance(args, list) and args[:3] == ["mcp", "gateway", "run"]:
+        normalized = []
+        index = 0
+        while index < len(args):
+            arg = args[index]
+            if arg == "--tools":
+                index += 2
+                continue
+            if isinstance(arg, str) and arg.startswith("--tools="):
+                index += 1
+                continue
+            normalized.append(arg)
+            index += 1
+        normalized.extend(["--tools", "mcp-exec"])
+        if normalized != args:
+            docker["args"] = normalized
+            changed = True
+
+if not changed:
+    raise SystemExit(0)
 new_text = json.dumps(config, indent=2, ensure_ascii=False) + "\n"
 suffix = os.environ.get("MODEL_TEAM_BACKUP_SUFFIX", "")
 if suffix and text:

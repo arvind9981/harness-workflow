@@ -6,7 +6,7 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-ExecStart=%h/.local/bin/headroom proxy --port 8787 --host 127.0.0.1
+ExecStart=%h/.local/bin/headroom proxy --port 8787 --host 127.0.0.1 --mode cache --no-cache
 Restart=on-failure
 RestartSec=3
 # The proxy backs the headroom MCP retrieve/compress tools AND serves the

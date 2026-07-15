@@ -1,0 +1,93 @@
+name: update workflow tool versions
+
+on:
+  schedule:
+    - cron: "17 6 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+
+concurrency:
+  group: update-workflow-tool-versions
+  cancel-in-progress: false
+
+jobs:
+  update:
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Apply current PyPI releases
+        id: versions
+        run: |
+          ./tools/update-versions.sh --apply
+          if git diff --quiet; then
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Check for an existing update PR
+        if: steps.versions.outputs.changed == 'true'
+        id: existing
+        run: |
+          count="$(gh pr list --state open --search 'in:title "chore: update workflow tool versions"' --json number --jq 'length')"
+          if [ "$count" -gt 0 ]; then
+            echo "open=true" >> "$GITHUB_OUTPUT"
+            echo "An update PR is already open; leaving it as the review gate."
+          else
+            echo "open=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Smoke-test candidate packages in isolation
+        if: steps.versions.outputs.changed == 'true' && steps.existing.outputs.open == 'false'
+        run: |
+          python3 -m pip install --user uv
+          export PATH="$HOME/.local/bin:$PATH"
+          export UV_TOOL_DIR="$RUNNER_TEMP/uv-tools"
+          export UV_TOOL_BIN_DIR="$RUNNER_TEMP/uv-bin"
+          headroom_version="$(sed -n 's/^HEADROOM_VERSION="${HEADROOM_VERSION:-\([^}]*\)}"$/\1/p' init.sh)"
+          mempalace_version="$(sed -n 's/^MEMPALACE_VERSION="${MEMPALACE_VERSION:-\([^}]*\)}"$/\1/p' init.sh)"
+          graphify_version="$(sed -n 's/^GRAPHIFY_VERSION="${GRAPHIFY_VERSION:-\([^}]*\)}"$/\1/p' init.sh)"
+          uv tool install "headroom-ai[proxy]==$headroom_version"
+          uv tool install "mempalace==$mempalace_version"
+          uv tool install "graphifyy==$graphify_version"
+          "$UV_TOOL_BIN_DIR/headroom" --version
+          "$UV_TOOL_BIN_DIR/mempalace" --version
+          "$UV_TOOL_BIN_DIR/graphify" --version
+          MEMPALACE_PY="$UV_TOOL_DIR/mempalace/bin/python" \
+            bash tools/mempalace/patch-divergence-threshold.sh
+          "$UV_TOOL_DIR/mempalace/bin/python" - <<'PY'
+          import mempalace.backends.chroma as chroma
+          assert chroma._HNSW_DIVERGENCE_FALLBACK_FLOOR == 0
+          assert chroma._HNSW_DIVERGENCE_FRACTION == 0.0
+          PY
+
+      - name: Run repository regressions
+        if: steps.versions.outputs.changed == 'true' && steps.existing.outputs.open == 'false'
+        run: |
+          bash tools/codex/test-workflow.sh all
+          bash tools/model-team/test-model-team.sh all
+          bash tools/opencode/test-workflow.sh all
+          bash -n init.sh tools/update-versions.sh tools/**/*.sh
+          git diff --check
+
+      - name: Open reviewed update PR
+        if: steps.versions.outputs.changed == 'true' && steps.existing.outputs.open == 'false'
+        run: |
+          branch="automation/tool-versions-$GITHUB_RUN_ID"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git checkout -b "$branch"
+          git add init.sh README.md tools/codex/test-workflow.sh
+          git commit -m "chore: update workflow tool versions"
+          git push --set-upstream origin "$branch"
+          gh pr create \
+            --title "chore: update workflow tool versions" \
+            --body "Automated weekly update of the pinned Headroom, Mempalace, and Graphify releases. Candidate CLIs and repository regressions passed. This PR is intentionally not auto-merged."

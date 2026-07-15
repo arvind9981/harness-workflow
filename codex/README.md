@@ -6,7 +6,7 @@ The Codex bootstrap mirrors the repo-maintained parts of the Claude workflow:
 - `hooks.json` wires memory recall, graphify-first search nudges, graph refresh,
   session recap, and headroom initialization.
 - `../workflow/skills` installs the shared `$consult`, `$brainstorming`,
-  `karpathy-guidelines`, and on-demand `jira-live` skills.
+  `karpathy-guidelines`, and other on-demand workflow skills.
 - `fast.config.toml` installs as the supported standalone
   `~/.codex/fast.config.toml` profile: `codex --profile fast`.
 - `../tools/codex/install-codex.sh` copies the shared hook scripts into
@@ -17,13 +17,10 @@ The Codex bootstrap mirrors the repo-maintained parts of the Claude workflow:
   while leaving ChatGPT auth/backend routing untouched. Existing machine-owned
   plugins, credentials, MCP commands/profiles, project trust, command rules,
   `danger-full-access`, and shell inheritance remain unchanged. When an existing
-  `[mcp_servers.MCP_DOCKER]` table is present, the installer manages only its
-  `startup_timeout_sec = 60` value so Docker MCP has enough startup headroom.
-
-Jira behavior is deliberately absent from always-loaded `AGENTS.md`. The
-`jira-live` skill loads it only for Jira requests and retains the bounded live
-`MCP_DOCKER` retry, direct Docker gateway fallback, and ambiguous-write
-protection.
+  `[mcp_servers.MCP_DOCKER]` table is present, the installer keeps its configured
+  profile, sets `startup_timeout_sec = 60`, and narrows the exposed catalog to the
+  small dynamic-management surface containing `mcp-exec`. Other MCP servers
+  remain unchanged.
 
 Run it directly:
 

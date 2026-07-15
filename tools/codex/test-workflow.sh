@@ -132,6 +132,27 @@ test_instructions() {
   assert_file_contains "$agents" 'use /efficient-frontier only when' 'AGENTS scopes efficient-frontier to worthwhile delegation'
   assert_file_contains "$agents" 'Keep single-file and latency-sensitive work inline.' 'AGENTS keeps small work on the fast path'
   assert_file_not_contains "$agents" 'use the /efficient-frontier skill always.' 'AGENTS removes unconditional frontier delegation'
+  if jq -e '.permissions.allow | length <= 10' "$REPO_DIR/claude/settings.local.json" >/dev/null \
+      && ! grep -Fq 'Bash(sudo ' "$REPO_DIR/claude/settings.local.json"; then
+    pass 'tracked Claude local settings contain only the minimal managed permissions'
+  else
+    fail 'tracked Claude local settings contain personal command history'
+  fi
+  assert_file_contains "$REPO_DIR/init.sh" 'HEADROOM_VERSION="${HEADROOM_VERSION:-0.31.0}"' 'init pins the default Headroom version'
+  assert_file_contains "$REPO_DIR/init.sh" 'MEMPALACE_VERSION="${MEMPALACE_VERSION:-3.5.0}"' 'init pins the default Mempalace version'
+  assert_file_contains "$REPO_DIR/init.sh" 'GRAPHIFY_VERSION="${GRAPHIFY_VERSION:-0.9.16}"' 'init pins the default Graphify version'
+  assert_file_contains "$REPO_DIR/init.sh" 'BEGIN HARNESS-WORKFLOW MANAGED' 'init reconciles a managed Claude instruction block'
+  if [ -f "$REPO_DIR/.github/workflows/verify.yml" ]; then
+    pass 'repository has a portable verification workflow'
+  else
+    fail 'repository has no CI verification workflow'
+  fi
+  assert_file_contains "$REPO_DIR/tools/headroom/headroom-proxy.service" '--mode cache' 'default Headroom service has an explicit cache policy'
+  assert_file_contains "$REPO_DIR/tools/headroom/headroom-proxy.service" '--no-cache' 'systemd Headroom service disables local response replay'
+  assert_file_contains "$REPO_DIR/tools/headroom/com.user.headroom-proxy.plist" '<string>--no-cache</string>' 'launchd Headroom service disables local response replay'
+  assert_file_contains "$REPO_DIR/init.sh" 'headroom proxy --port 8787 --host 127.0.0.1 --mode cache --no-cache' 'manual Headroom fallback preserves the response-cache policy'
+  assert_file_contains "$REPO_DIR/tools/headroom/headroom-canary" '--intercept-tool-results' 'Headroom tool-result experiment is isolated behind an opt-in canary'
+  assert_file_contains "$REPO_DIR/tools/headroom/headroom-canary" '--no-cache' 'Headroom canary disables local response replay'
   if [ -f "$REPO_DIR/codex/references/memory-tooling.md" ]; then
     pass 'memory-tooling reference is repository-owned'
   else
@@ -206,6 +227,11 @@ startup_timeout_sec	=	10
 [plugins.sentinel] # preserve
 enabled = true
 
+[mcp_servers.personal] # preserve
+command = "personal"
+args = ["--keep"]
+enabled = false
+
 [shell_environment_policy] # preserve
 inherit = "all"
 
@@ -233,16 +259,21 @@ with open(sys.argv[1], "rb") as fh:
 assert config["sandbox_mode"] == "danger-full-access"
 docker = config["mcp_servers"]["MCP_DOCKER"]
 assert docker["command"] == "docker"
-assert docker["args"] == ["mcp", "gateway", "run", "--profile", "xebia"]
+assert docker["args"] == [
+    "mcp", "gateway", "run", "--profile", "xebia", "--tools", "mcp-exec"
+]
 assert docker["startup_timeout_sec"] == 60
+assert config["mcp_servers"]["personal"] == {
+    "command": "personal", "args": ["--keep"], "enabled": False
+}
 assert config["plugins"]["sentinel"]["enabled"] is True
 assert config["shell_environment_policy"]["inherit"] == "all"
 assert config["shell_environment_policy"]["set"]["KEEP"] == "yes"
 PY
   then
-    pass 'installer preserves access and unrelated TOML while setting MCP timeout'
+    pass 'installer narrows Docker MCP while preserving access and personal MCPs'
   else
-    fail 'installer preserves access and unrelated TOML while setting MCP timeout'
+    fail 'installer did not preserve access or reconcile MCP configuration'
   fi
 
   if grep -Fq '# preserve-this-comment' "$config"; then
@@ -495,8 +526,8 @@ fi
 case "$*" in
   'mcp profile list') printf 'xebia\n' ;;
   'mcp profile server ls --filter profile=xebia') printf 'atlassian\n' ;;
-  'mcp tools count --gateway-arg=--profile=xebia') printf '57\n' ;;
-  'mcp tools ls --format=list --gateway-arg=--profile=xebia') printf 'jira_search\njira_get_issue\nconfluence_search\n' ;;
+  'mcp tools count --gateway-arg=--profile=xebia --gateway-arg=--tools=mcp-exec') printf '8\n' ;;
+  'mcp tools ls --format=list --gateway-arg=--profile=xebia --gateway-arg=--tools=mcp-exec') printf 'mcp-exec\nmcp-find\nmcp-activate-profile\n' ;;
 esac
 EOF
   ln -s "$TEST_PYTHON" "$fake_bin/python3"
@@ -508,10 +539,11 @@ EOF
   assert_text_contains "$output" 'PASS Codex executable resolved:' 'doctor resolves explicit or bundled Codex'
   assert_text_contains "$output" 'PASS MCP_DOCKER startup timeout is 60 seconds' 'doctor requires MCP_DOCKER startup headroom'
   assert_text_contains "$output" 'PASS MCP_DOCKER enabled in Codex' 'doctor checks Codex MCP enablement'
+  assert_text_contains "$output" 'PASS MCP_DOCKER uses dynamic gateway mode' 'doctor checks Docker MCP on-demand isolation'
   assert_text_contains "$output" 'PASS Docker MCP profile available: xebia' 'doctor checks the configured Docker profile'
   assert_text_contains "$output" 'PASS Atlassian server enabled in profile: xebia' 'doctor checks Atlassian profile membership'
-  assert_text_contains "$output" 'PASS Docker MCP gateway exposes 57 tools' 'doctor checks positive Docker tool inventory'
-  assert_text_contains "$output" 'PASS Docker MCP gateway exposes Jira tools' 'doctor checks Jira tool inventory without calling Jira'
+  assert_text_contains "$output" 'PASS Docker MCP dynamic gateway exposes 8 management tools' 'doctor checks bounded dynamic tool inventory'
+  assert_text_contains "$output" 'PASS Docker MCP dynamic gateway includes mcp-exec' 'doctor checks dynamic execution without calling an external tool'
   assert_text_contains "$output" 'PASS workflow repository included in discovery' 'doctor seeds discovery with REPO_DIR'
   if printf '%s\n' "$output" | grep -Fq 'CLI drain remains fallback'; then
     fail 'doctor removes unconditional CLI-drain warning'
@@ -527,10 +559,32 @@ EOF
     CODEX_DOCTOR_RUNTIME=0 TEST_LOG="$log" DOCKER_FAIL_MODE=1 PATH="$fake_bin:/usr/bin:/bin" \
     "$REPO_DIR/tools/codex/doctor-workflow.sh" 2>&1)"
   failure_rc=$?
-  if [ "$failure_rc" -ne 0 ] && printf '%s\n' "$failure_output" | grep -Fq 'FAIL Docker MCP profile lookup failed'; then
-    pass 'doctor rejects failed Docker inventory commands despite misleading output'
+  if [ "$failure_rc" -eq 0 ] && printf '%s\n' "$failure_output" | grep -Fq 'WARN Docker MCP profile lookup failed'; then
+    pass 'doctor reports optional Docker inventory failures without trusting misleading output'
   else
-    fail 'doctor rejects failed Docker inventory commands despite misleading output'
+    fail 'doctor did not handle an optional Docker inventory failure safely'
+  fi
+
+  cat > "$config" <<'EOF'
+sandbox_mode = "danger-full-access"
+
+[plugins.sentinel]
+enabled = true
+
+[shell_environment_policy]
+inherit = "all"
+EOF
+  HOME="$home" CODEX_DIR="$codex_dir" BIN_DIR="$tmp/local-bin" \
+    "$REPO_DIR/tools/codex/install-codex.sh" >/dev/null 2>&1
+  optional_output="$(HOME="$home" CODEX_DIR="$codex_dir" CODEX_BIN="$fake_bin/codex-explicit" \
+    CODEX_DOCTOR_RUNTIME=0 TEST_LOG="$log" PATH="$fake_bin:/usr/bin:/bin" \
+    "$REPO_DIR/tools/codex/doctor-workflow.sh" 2>&1)"
+  optional_rc=$?
+  if [ "$optional_rc" -eq 0 ] \
+      && printf '%s\n' "$optional_output" | grep -Fq 'WARN MCP_DOCKER is not configured (optional)'; then
+    pass 'doctor accepts a Codex installation without optional Docker MCP'
+  else
+    fail 'doctor treats missing optional Docker MCP as a broken Codex workflow'
   fi
   if [ "$FAILURES" -ne 0 ]; then
     printf '%s\n' '--- isolated doctor output ---' "$output" >&2
@@ -539,8 +593,99 @@ EOF
   rm -rf "$tmp"
 }
 
+test_versions() {
+  local updater="$REPO_DIR/tools/update-versions.sh"
+  local workflow="$REPO_DIR/.github/workflows/update-tool-versions.yml"
+  local tmp fixture registry output rc before after applied
+  local headroom_current mempalace_current graphify_current
+
+  if [ -x "$updater" ]; then
+    pass 'version updater exists and is executable'
+  else
+    fail 'version updater exists and is executable'
+    return
+  fi
+
+  tmp="$(mktemp -d "${TMPDIR:-/tmp}/workflow-versions.XXXXXX")"
+  fixture="$tmp/repo"
+  registry="$tmp/registry"
+  mkdir -p "$fixture/tools/codex" "$registry/headroom-ai" "$registry/mempalace" "$registry/graphifyy"
+  cp "$REPO_DIR/init.sh" "$fixture/init.sh"
+  cp "$REPO_DIR/README.md" "$fixture/README.md"
+  cp "$REPO_DIR/tools/codex/test-workflow.sh" "$fixture/tools/codex/test-workflow.sh"
+  headroom_current="$(sed -n 's/^HEADROOM_VERSION="${HEADROOM_VERSION:-\([^}]*\)}"$/\1/p' "$fixture/init.sh")"
+  mempalace_current="$(sed -n 's/^MEMPALACE_VERSION="${MEMPALACE_VERSION:-\([^}]*\)}"$/\1/p' "$fixture/init.sh")"
+  graphify_current="$(sed -n 's/^GRAPHIFY_VERSION="${GRAPHIFY_VERSION:-\([^}]*\)}"$/\1/p' "$fixture/init.sh")"
+  printf '{"info":{"version":"99.32.1"}}\n' > "$registry/headroom-ai/json"
+  printf '{"info":{"version":"99.6.1"}}\n' > "$registry/mempalace/json"
+  printf '{"info":{"version":"99.9.17"}}\n' > "$registry/graphifyy/json"
+
+  before="$(hash_file "$fixture/init.sh")|$(hash_file "$fixture/README.md")|$(hash_file "$fixture/tools/codex/test-workflow.sh")"
+  output="$(HARNESS_WORKFLOW_ROOT="$fixture" PYPI_BASE_URL="file://$registry" "$updater" --check 2>&1)"
+  rc=$?
+  after="$(hash_file "$fixture/init.sh")|$(hash_file "$fixture/README.md")|$(hash_file "$fixture/tools/codex/test-workflow.sh")"
+  if [ "$rc" -eq 0 ] && [ "$before" = "$after" ]; then
+    pass 'version check reports updates without modifying files'
+  else
+    fail 'version check reports updates without modifying files'
+  fi
+  assert_text_contains "$output" "headroom-ai current=$headroom_current latest=99.32.1 update=available" 'version check reports Headroom drift'
+  assert_text_contains "$output" "mempalace current=$mempalace_current latest=99.6.1 update=available" 'version check reports Mempalace drift'
+  assert_text_contains "$output" "graphifyy current=$graphify_current latest=99.9.17 update=available" 'version check reports Graphify drift'
+
+  output="$(HARNESS_WORKFLOW_ROOT="$fixture" PYPI_BASE_URL="file://$registry" "$updater" --apply 2>&1)"
+  rc=$?
+  if [ "$rc" -eq 0 ] \
+      && grep -Fq 'HEADROOM_VERSION="${HEADROOM_VERSION:-99.32.1}"' "$fixture/init.sh" \
+      && grep -Fq 'MEMPALACE_VERSION="${MEMPALACE_VERSION:-99.6.1}"' "$fixture/init.sh" \
+      && grep -Fq 'GRAPHIFY_VERSION="${GRAPHIFY_VERSION:-99.9.17}"' "$fixture/init.sh" \
+      && grep -Fq '| Headroom | 99.32.1 |' "$fixture/README.md" \
+      && grep -Fq 'HEADROOM_VERSION="${HEADROOM_VERSION:-99.32.1}"' "$fixture/tools/codex/test-workflow.sh"; then
+    pass 'version apply advances synchronized repository pins'
+  else
+    fail 'version apply advances synchronized repository pins'
+  fi
+
+  applied="$(hash_file "$fixture/init.sh")|$(hash_file "$fixture/README.md")|$(hash_file "$fixture/tools/codex/test-workflow.sh")"
+  HARNESS_WORKFLOW_ROOT="$fixture" PYPI_BASE_URL="file://$registry" "$updater" --apply >/dev/null 2>&1
+  after="$(hash_file "$fixture/init.sh")|$(hash_file "$fixture/README.md")|$(hash_file "$fixture/tools/codex/test-workflow.sh")"
+  if [ "$applied" = "$after" ]; then
+    pass 'second version apply is idempotent'
+  else
+    fail 'second version apply is idempotent'
+  fi
+
+  before="$after"
+  HARNESS_WORKFLOW_ROOT="$fixture" PYPI_BASE_URL="file://$tmp/missing" "$updater" --apply >/dev/null 2>&1
+  rc=$?
+  after="$(hash_file "$fixture/init.sh")|$(hash_file "$fixture/README.md")|$(hash_file "$fixture/tools/codex/test-workflow.sh")"
+  if [ "$rc" -ne 0 ] && [ "$before" = "$after" ]; then
+    pass 'registry failure leaves version pins unchanged'
+  else
+    fail 'registry failure leaves version pins unchanged'
+  fi
+
+  if [ -f "$workflow" ]; then
+    pass 'weekly version update workflow exists'
+    assert_file_contains "$workflow" 'schedule:' 'version workflow has a scheduled trigger'
+    assert_file_contains "$workflow" 'workflow_dispatch:' 'version workflow supports manual dispatch'
+    assert_file_contains "$workflow" 'tools/update-versions.sh --apply' 'version workflow applies synchronized pins'
+    assert_file_contains "$workflow" 'UV_TOOL_DIR' 'version workflow isolates candidate tool installs'
+    assert_file_contains "$workflow" 'bash tools/codex/test-workflow.sh all' 'version workflow runs Codex regressions'
+    assert_file_contains "$workflow" 'bash tools/model-team/test-model-team.sh all' 'version workflow runs model-team regressions'
+    assert_file_contains "$workflow" 'bash tools/opencode/test-workflow.sh all' 'version workflow runs OpenCode regressions'
+    assert_file_contains "$workflow" 'gh pr list' 'version workflow avoids duplicate open PRs'
+    assert_file_contains "$workflow" 'gh pr create' 'version workflow opens a review PR'
+    assert_file_not_contains "$workflow" 'gh pr merge' 'version workflow never auto-merges'
+  else
+    fail 'weekly version update workflow exists'
+  fi
+
+  rm -rf "$tmp"
+}
+
 usage() {
-  printf 'Usage: %s {platform|instructions|discovery|installer|hooks|doctor|all}\n' "$0" >&2
+  printf 'Usage: %s {platform|instructions|discovery|installer|hooks|doctor|versions|all}\n' "$0" >&2
 }
 
 group="${1:-all}"
@@ -551,6 +696,7 @@ case "$group" in
   installer) test_installer ;;
   hooks) test_hooks ;;
   doctor) test_doctor ;;
+  versions) test_versions ;;
   all)
     test_platform
     test_instructions
@@ -558,6 +704,7 @@ case "$group" in
     test_installer
     test_hooks
     test_doctor
+    test_versions
     ;;
   *) usage; exit 2 ;;
 esac

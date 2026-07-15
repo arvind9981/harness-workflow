@@ -13,6 +13,12 @@
 # OS / editor noise
 .DS_Store
 *.swp
+__pycache__/
+*.py[cod]
+.pytest_cache/
+node_modules/
+coverage/
+.coverage
 
 # MemPalace per-project files (issue #185)
 mempalace.yaml

@@ -1,7 +1,9 @@
 # Harness Workflow
 
-A portable Claude Code and Codex workflow with local memory, code-graph search,
-context compression, and an optional multi-model implementation loop.
+A portable, single-writer development workflow for Claude Code, Codex, and
+OpenCode. It combines automatic model routing, local memory, code-graph search,
+context optimization, isolated workers, and observable review loops without
+replacing personal credentials or configuration.
 
 ## Quick start
 
@@ -12,189 +14,431 @@ cd harness-workflow
 claude
 ```
 
-`init.sh` is backup-first, idempotent, and supports macOS and Linux. Sign in to
-Claude Code interactively on first launch. Use `./init.sh --codex` to require
-Codex; otherwise Codex and model-team are installed only when the executable is
-found on `PATH`, through `CODEX_BIN`, or in a supported macOS app bundle.
+`init.sh` supports macOS and Linux, detects Codex and OpenCode when installed,
+and safely skips optional harnesses that are absent. Use `./init.sh --codex` when
+Codex is required and setup should fail if it cannot be found.
 
-## Architecture
-
-### Traffic routing
-
-| Client | Local route | Destination |
-|---|---|---|
-| Claude Code and Graphify model work | `ANTHROPIC_BASE_URL` -> Headroom `:8787` | Claude backend |
-| Codex CLI and `codex-worker` | `OPENAI_BASE_URL` -> Headroom `:8787/v1` | Native Codex backend |
-| Mempalace recall and Graphify queries | Local process and local data | No model request |
-
-Headroom is the shared routing and context-compression layer for configured Claude
-and Codex model traffic. Mempalace owns durable local recall. Graphify owns the
-per-repository code graph.
-
-### Model-team lifecycle
-
-```mermaid
-flowchart LR
-    U["User"] --> C["Claude controller<br/>plan and memory"]
-    C -->|codex| W["Codex worker<br/>investigate, implement, verify"]
-    W -->|diff and tests| R["Claude review"]
-    R -->|approved| O["Result"]
-    R -->|repair via codex-reply| W
-```
-
-Claude is the control plane. Codex is the repository worker. A repair continues
-the original Codex thread with `codex-reply`; it does not create another writer.
-
-## Installation contract
-
-`init.sh` installs or reconciles these layers:
-
-| Layer | Installed behavior |
-|---|---|
-| Claude Code | Settings, global instructions, lifecycle hooks, status line, workflows, and plugin declarations under `~/.claude` |
-| Headroom | `headroom-ai[proxy]`, `headroom-watch`, and an auto-starting service on `127.0.0.1:8787` |
-| Mempalace | Local CLI/MCP, recall hooks, health checks, and scheduled maintenance |
-| Graphify | CLI, global skill, local-query hooks, and optional graph-to-memory reseeding |
-| Codex | Shared hooks, skills, instructions, references, environment routing, and `~/.codex/fast.config.toml` |
-| Model team | `model-team` skill, the user-scoped `codex-worker` MCP registration, permissions, diagnostics, and `model-team-watch` |
-| OpenCode | Its workflow adapter and local MCP integrations, only when OpenCode is already installed |
-
-Unrelated Codex credentials, plugins, MCP profiles, trust state, projects, and
-skills are preserved. Claude's `settings.local.json` is backed up and replaced by
-the repository's personal allowlist; review its host-specific entries before using
-this as a generic team baseline. Services use `launchd` on macOS and
-`systemd --user` on Linux.
-
-## Model-team activation
-
-| Mode | Behavior |
-|---|---|
-| Explicit on | `/model-team <task>` always activates the workflow |
-| Automatic | Activates for architecture, migrations, security, authentication, concurrency, deployment, ambiguous production debugging, token-heavy investigation, multi-component work, or at least two independent bounded subtasks |
-| Explicit off | `use a single agent` disables model-team for the current task |
-| Single-agent default | Questions, ordinary read-only advice, small mechanical or documentation changes, and latency-sensitive work stay inline |
-
-Automatic activation is announced with a reason before the worker is dispatched.
-Nested model-team runs and concurrent writers are forbidden.
-
-### Roles and permissions
-
-| Role | Model selection | Access and ownership |
-|---|---|---|
-| Claude controller | Configured Claude/Fable path | Planning, Mempalace recall, review, and outward actions |
-| Optional reconnaissance | Terra when available | Read-only and skippable; never substituted through another bridge |
-| Codex implementation worker | Machine's configured default Codex model | `danger-full-access`, approval policy `never`, and the only repository writer |
-| Final review | Focused Fable pass | Reviews the real diff and test evidence without editing |
-
-Claude passes at most five distilled memory bullets, never raw drawers,
-transcripts, or credentials. Repairs reuse the same process-local thread: one
-round normally, and a second only for a confirmed high-severity finding.
-
-## Verify and observe
-
-Run the token-free doctors and repository regression suites:
+After installation:
 
 ```bash
 ./tools/codex/doctor-workflow.sh
 ./tools/model-team/doctor-model-team.sh
-./tools/codex/test-workflow.sh all
-./tools/model-team/test-model-team.sh all
+./tools/opencode/doctor-workflow.sh       # only when OpenCode is installed
 ```
 
-The Codex worker is an MCP process, not a Claude subagent, so it does not appear
-in Claude Code's agents pane. During a dispatch Claude shows `Calling
-codex-worker`; press `Ctrl+O` to expand the tool call. The model-team skill also
-prints `MODEL-TEAM DISPATCH`, `MODEL-TEAM REVIEW`, and `MODEL-TEAM COMPLETE`
-receipts.
+Start a new terminal session after installation so updated commands and
+configuration are loaded.
 
-Use the dashboards from another terminal:
+## How the workflow runs
 
-```bash
-model-team-watch                 # live worker availability, recent requests, and Git activity
-model-team-watch --once          # one human-readable snapshot
-headroom-watch                   # live routing and compression statistics
-headroom-watch --once            # one snapshot
+```mermaid
+flowchart LR
+    U["User task"] --> R{"Harness and route"}
+
+    R -->|"Claude Code"| C["Claude control plane<br/>memory, live services, verification"]
+    C -->|"plan"| F["Fable architect<br/>read-only"]
+    F -->|"task contract"| C
+    C -->|"codex"| W["Codex worker<br/>only repository writer"]
+    W -->|"diff and tests"| C
+    C -->|"evidence"| F
+    F -->|"accept or repair"| C
+
+    R -->|"OpenCode"| S["Sol controller<br/>only repository writer"]
+    S -->|"standard"| N["Sonnet advisor<br/>read-only"]
+    S -->|"high risk"| OF["Fable architect<br/>read-only"]
+    S -.->|"bounded reconnaissance"| T["Terra scout"]
+    S -.->|"only when needed"| O["Memory or live-service agent"]
+
+    C --> H["Headroom :8787"]
+    S --> H
 ```
 
-`codex-worker UP` means the MCP server is available; it may be idle. The latest
-request timestamp and `requests/5m` prove recent completed Codex traffic.
-`headroom-watch` reports the latest completed request across clients and aggregate
-compression; it is not an in-flight worker monitor. Run `model-team-watch --help`
-for JSON output, worktree selection, and refresh controls.
+The Claude path uses Claude as the control plane, a resumable Fable architect
+for planning and review, and a Codex MCP worker for implementation. Repairs use
+`codex-reply` on the original process-local worker thread.
 
-After running `init.sh`, start a fresh Claude Code process and force a small live
-check:
+The OpenCode path keeps Sol as the only writer. It automatically routes medium work through Sonnet 5
+and high-risk work through Fable 5. Terra handles bounded
+read-only reconnaissance. Memory and live-service MCP schemas are exposed only
+through on-demand subagents, keeping ordinary build turns smaller.
+
+All configured Claude, Codex, and OpenCode model traffic goes through the local
+Headroom proxy. Mempalace recall and Graphify queries operate on local data.
+
+## Automatic routing
+
+Both model-team implementations score the same six dimensions from 0 to 2:
+scope, coupling, ambiguity, blast radius, reversibility, and verification.
+
+| Score | Route | Behavior |
+|---:|---|---|
+| 0-2 | Inline | The primary harness handles the task without a model team |
+| 3-6 | Standard | Plan or advise, implement with one writer, then run one focused review |
+| 7-12 | High risk | Use architecture review, optional bounded reconnaissance, strict evidence review, and the high-severity repair gate |
+
+Security, authentication, data migration, concurrency, production deployment,
+irreversible changes, cross-system architecture, and ambiguous high-impact
+failures always use the high-risk route.
+
+| Control | Claude Code | OpenCode |
+|---|---|---|
+| Automatic | Enabled for qualifying implementation work | Enabled for medium and high work |
+| Force on | `/model-team <task>` | `/team <task>` |
+| Force off | `use a single agent` | `use a single agent` |
+
+Force-on commands activate at least the standard route without artificially
+inflating the score. The explicit single-agent instruction always wins.
+Questions, routine advice, small mechanical changes, documentation-only work,
+and latency-sensitive requests normally remain inline.
+
+## Daily use
+
+Use Claude Code normally. Automatic routing announces the score and reason
+before dispatching workers. To force the team for a specific task:
 
 ```text
-/model-team Inspect this repository read-only and report its current branch.
+/model-team Diagnose this production race and implement a verified fix.
 ```
 
-A working run shows dispatch, `Calling codex-worker`, recent watcher activity,
-review, and completion. Unlike the doctors, this check consumes model tokens.
+Use OpenCode normally with the default `build` agent. To force its team:
 
-## Memory and code intelligence
+```text
+/team Refactor this authentication flow and verify the migration path.
+```
 
-### Mempalace
+For a task where latency matters more than independent review:
 
-Mempalace is the durable local memory tier. Its plugin captures sessions; hooks
-inject project context and relevant verbatim recall. Claude owns recall during
-model-team runs.
+```text
+Use a single agent. Update this typo and run the focused check.
+```
 
-Seed a new machine once, outside an active MCP-backed session:
+### Roles and boundaries
+
+| Role | Model | Responsibility |
+|---|---|---|
+| Claude control plane | Current Claude session | Recall, live services, orchestration, independent verification, and outward actions |
+| Fable architect | `fable` | Read-only planning, decomposition, replanning, and evidence-based review |
+| Codex worker | Configured Codex default | `danger-full-access`, approval policy `never`, implementation and verification |
+| OpenCode controller | `openai/gpt-5.6-sol` | Only writer in OpenCode; owns the actual diff and tests |
+| OpenCode scouts | `openai/gpt-5.6-terra` | Bounded repository or official-documentation reconnaissance |
+| OpenCode memory/service | `openai/gpt-5.6-luna` | Bounded on-demand MCP access without loading those schemas into normal turns |
+
+The Codex worker uses an isolated per-process `CODEX_HOME` with zero inner MCP servers
+or plugins. It links the existing login and retains only model routing,
+reasoning, Headroom, and full-access safety settings. Only one writer may run at
+a time; nested model-team invocation is forbidden.
+
+The OpenCode Claude worker starts with `--safe-mode`, no user plugins or hooks,
+and no MCP servers. Default per-call spend ceilings are USD 4 for advice, USD 3
+for routine review, USD 8 for architecture, and USD 6 for critical review.
+Environment variables named `CLAUDE_WORKER_<ROLE>_BUDGET_USD` can override them.
+
+## Tool guide
+
+`init.sh` installs daily commands into `~/.local/bin`. Repository-relative
+commands below can be run directly from this checkout.
+
+### Observe model activity
+
+```bash
+model-team-watch
+model-team-watch --once
+model-team-watch --json --repo /path/to/repository
+```
+
+Use `model-team-watch` while Claude is orchestrating Codex. `ACTIVE` means an
+instrumented `codex` or `codex-reply` call is currently in flight. `READY` and `IDLE`
+mean the MCP server is available but not working. The display includes
+the current orchestration phase, actor, task, repository, and Git state; ordinary
+Codex Desktop requests are excluded.
+
+```bash
+headroom-watch
+headroom-watch --once
+headroom-watch --raw
+headroom perf
+```
+
+Use `headroom-watch` for the machine-wide view of models, completed requests,
+cache behavior, and compression. Use `--raw` when diagnosing the underlying
+`/stats` payload. `headroom perf` reports historical token and latency results.
+It is not an in-flight Codex-worker monitor.
+
+### Diagnose an installation
+
+```bash
+./tools/codex/doctor-workflow.sh
+./tools/model-team/doctor-model-team.sh
+./tools/opencode/doctor-workflow.sh
+```
+
+- The Codex doctor checks installed instructions, hooks, routing, optional live
+  service access, Mempalace, Graphify, and repository state.
+- The model-team doctor checks the Fable architect, isolated worker, permissions,
+  Headroom health, Mempalace availability, and token-free MCP handshakes.
+- The OpenCode doctor checks agents, worker isolation, merged configuration,
+  Headroom routing, optional MCP availability, and plugin loading.
+
+Treat `FAIL` as broken setup. `WARN` identifies optional capability or local
+maintenance; read the doctor's final next action before changing configuration.
+
+### Query and refresh Graphify
+
+Create a repository graph through Claude Code:
+
+```text
+/graphify .
+```
+
+Use the local graph before broad source scans whenever
+`graphify-out/graph.json` exists:
+
+```bash
+graphify query "Where is authentication configured?"
+graphify path "request handler" "database client"
+graphify explain "deployment pipeline"
+graphify update .
+```
+
+- `query` returns the scoped subgraph relevant to a question.
+- `path` traces relationships between two concepts.
+- `explain` focuses on one concept and its neighborhood.
+- `update` performs a local AST refresh after source changes. It does not name
+  new communities.
+
+For a complete named map during a live Claude/Mempalace session:
+
+```bash
+graphify-sync.sh /path/to/repository
+reseed-verify.sh /path/to/repository
+```
+
+These commands label and stage reports but do not write to Mempalace. For every
+successful `MINE wing=... source=...` line, ask the active agent to mine that
+source through the already-running Mempalace MCP. Never start a second CLI
+palace writer during a live MCP-backed session.
+
+The standalone replacement path is strictly out of session:
+
+```bash
+graphify-reseed.sh /path/to/repository
+```
+
+It snapshots the palace, replaces structural wings, and refuses to proceed when
+a Mempalace MCP process is live. Use it only when Claude, Codex, OpenCode, and
+other Mempalace clients are closed.
+
+### Recall and maintain Mempalace
+
+Search durable memory when a task depends on earlier work or conventions:
+
+```bash
+mempalace search "model-team worker isolation"
+```
+
+Seed a new palace once, outside an active MCP-backed session:
 
 ```bash
 mempalace init "$HOME"
 mempalace mine ~/.claude/projects/ --mode convos
 ```
 
-Recall is local; the embedding model downloads on first use. Health, corruption
-recovery, reseeding, and single-writer procedures live in
-[`codex/references/memory-tooling.md`](codex/references/memory-tooling.md).
-
-### Graphify
-
-Graphs are per repository and created on demand:
+Maintenance is scheduled by `init.sh`, but can be run manually:
 
 ```bash
-/graphify .            # build or refresh through Claude Code
-graphify update .      # incremental local AST refresh
-graphify query "..."   # local graph traversal
+mempalace-snapshot.sh
+~/.local/share/uv/tools/mempalace/bin/python ~/.local/bin/mempalace-prune.py --dry-run
 ```
 
-Semantic builds can use model tokens; update and query are local. Search redirection
-activates only when `graphify-out/graph.json` exists. The output directory is
-globally ignored by Git.
+`mempalace-snapshot.sh` creates and verifies an online SQLite backup. Always run
+the pruner with `--dry-run` first; omit it only after reviewing the candidates.
+Recovery and single-writer procedures are in
+[`codex/references/memory-tooling.md`](codex/references/memory-tooling.md).
 
-Add extra repositories to the Graphify-to-Mempalace reseed list without editing
-the installer:
+### Run advanced maintenance
+
+After Claude installs or updates the Mempalace plugin, reapply the local hook
+hardening:
 
 ```bash
+mempalace-stop-timeout.sh 90
+mempalace-stop-detach.sh
+```
+
+Both commands are idempotent, and `init.sh` already runs them best-effort. The
+first raises the Stop-hook safety timeout; the second prevents overlapping
+Mempalace writers and removes Stop-hook latency from normal turns.
+
+For the repository set used by this personal workflow, preview a bulk Graphify
+refresh before allowing it to update configuration or memory:
+
+```bash
+./tools/graphify/refresh-structural-memory.sh --dry-run
+./tools/graphify/refresh-structural-memory.sh
+```
+
+This helper discovers only the repository roots declared in its `--help`
+output. Run it outside active Mempalace sessions; never add
+`--stop-live-mempalace` merely to bypass its writer guard.
+
+Component installers, MCP wrappers, service definitions, protocol smoke tests,
+and `patch-divergence-threshold.sh` are implementation internals. Use
+`./init.sh` to reconcile them. Run the doctor and test commands above to inspect
+or verify them instead of invoking those files directly.
+
+### Validate repository changes
+
+```bash
+./tools/codex/test-workflow.sh all
+./tools/model-team/test-model-team.sh all
+./tools/opencode/test-workflow.sh all
+git diff --check
+```
+
+The suites use isolated temporary homes and fake MCP/model binaries where
+possible. They validate portability, preservation, idempotency, worker
+protocols, routing, watchers, and failure behavior without spending model
+tokens. The same checks run in `.github/workflows/verify.yml`.
+
+## Installation contract
+
+`init.sh` installs pinned defaults:
+
+| Tool | Default version | Purpose |
+|---|---:|---|
+| Headroom | 0.31.0 | Local routing, cache optimization, and traffic statistics |
+| Mempalace | 3.5.0 | Durable local memory and MCP recall |
+| Graphify | 0.9.16 | Per-repository structural knowledge graph |
+
+Versions can be overridden with `HEADROOM_VERSION`, `MEMPALACE_VERSION`, and
+`GRAPHIFY_VERSION`. Matching installations are not upgraded or reinstalled.
+
+Check official PyPI releases without changing the repository, or advance every
+synchronized pin locally:
+
+```bash
+./tools/update-versions.sh --check
+./tools/update-versions.sh --apply
+```
+
+The updater changes `init.sh`, this version table, and the corresponding
+regression assertions together. A weekly GitHub workflow performs the same
+update, smoke-tests each candidate in isolated uv tool homes, runs all workflow
+suites, and opens a review PR when versions changed. It never auto-merges.
+
+Run the scheduled path on demand with:
+
+```bash
+gh workflow run update-tool-versions.yml
+```
+
+The repository's Actions settings must permit workflows to create pull
+requests. If that policy is disabled, use `--check` and `--apply` locally.
+
+The installer:
+
+- merges repo-owned Claude settings and a marked global-instruction block;
+- preserves unrelated permissions, credentials, plugins, hooks, MCPs, provider
+  settings, projects, trust state, and personal instructions;
+- discovers Codex through `PATH`, `CODEX_BIN`, and supported app bundles;
+- installs OpenCode integration only when OpenCode already exists;
+- renders machine-specific paths while keeping portable defaults in the repo;
+- uses `launchd` on macOS and `systemd --user` on Linux;
+- backs up only changed files and keeps the newest five `bak-init` snapshots;
+- is safe to rerun and performs no commit, push, or branch creation.
+
+Useful installer options:
+
+```bash
+./init.sh --help
+./init.sh --codex
+./init.sh --no-desktop
 ./init.sh --graphify-repo "$HOME/project-a" --graphify-repo "$HOME/project-b"
 GRAPHIFY_EXTRA_REPOS="$HOME/project-a:$HOME/project-b" ./init.sh
 ```
 
-## Optional OpenCode integration
+## Memory and code intelligence
 
-If OpenCode is present, `init.sh` installs its read-only consultation adapter and
-local Mempalace/Headroom MCPs without changing providers, credentials, or models.
+Mempalace is the durable memory tier. Claude owns recall during Claude-led
+model-team runs and passes no more than five distilled bullets to workers.
+OpenCode dispatches its memory agent only when prior work or conventions matter.
+Raw drawers, transcripts, reasoning, credentials, and unbounded tool output are
+never forwarded between models.
+
+Graphify is repository-scoped. Its generated `graphify-out/` directory is
+globally ignored and never belongs in a commit. Query and update are local;
+semantic extraction and community naming can consume model tokens.
+
+## Headroom and token visibility
+
+The installed routes are:
+
+| Client | Route |
+|---|---|
+| Claude Code and Graphify model work | `ANTHROPIC_BASE_URL=http://127.0.0.1:8787` |
+| Codex, OpenCode, and their workers | `OPENAI_BASE_URL=http://127.0.0.1:8787/v1` |
+
+The default proxy uses cache mode to preserve stable prefixes for provider-side
+KV-cache hits. Its separate local response cache is disabled with `--no-cache`
+so an identical troubleshooting prompt cannot replay a stale model response
+after repository or live state changes. Mempalace remains the only durable
+memory owner.
+
+Claude tool search defers MCP schemas, Codex exposes only its bounded dynamic
+management surface, and OpenCode keeps memory and live-service schemas behind
+on-demand agents. OpenCode routes OpenAI traffic through Headroom and gives its
+Claude worker the matching Anthropic endpoint.
+
+Test lossless tool-result interception separately:
 
 ```bash
-npm install -g opencode-ai
-./init.sh
+headroom-canary
 ```
 
-Restart OpenCode, then use `/consult <question>`. The higher-cost `fable-review`
-workflow remains opt-in for unusually risky final reviews.
+The canary starts a token-mode proxy on `127.0.0.1:8788`, logs aggregate request
+metadata under `~/.headroom/logs/canary.jsonl`, and never replaces the default
+`:8787` service. Point only a disposable session at it and watch that proxy from
+another terminal:
 
-## Requirements and safety
+```bash
+HEADROOM_URL=http://127.0.0.1:8788 headroom-watch
+```
 
-Required commands are `git`, `curl`, `jq`, and `uv`; `init.sh` can install `uv`
-interactively. Claude Code is installed separately. Codex and OpenCode are optional.
+Compare its live statistics with the default proxy, inspect `canary.jsonl` when
+needed, then stop the canary with `Ctrl+C`. `headroom perf` reads the default
+`proxy.log`; it does not include the separate canary log.
 
-- No secrets, OAuth tokens, API keys, credentials, or memory databases are stored
-  in the repository.
-- Installation is backup-first and idempotent. By default, the five newest
-  `bak-init` snapshots for each managed path are retained.
-- Codex full-access execution is intentional for hardcore troubleshooting. The
-  controller announces it before dispatch, and only one writer is allowed.
-- `init.sh` does not commit, push, or create branches.
+Claude-worker results include per-call model usage and cost when Claude reports
+them. Exact Codex-worker token attribution is unavailable because Headroom
+statistics are shared across machine traffic; do not infer it from nearby
+timestamps.
+
+## Verification
+
+A real end-to-end worker check consumes model tokens. After the doctors and
+regression suites pass, start a fresh Claude Code process and run:
+
+```text
+/model-team Inspect this repository read-only and report its current branch.
+```
+
+A healthy run shows the automatic route announcement, Fable plan, `Calling
+codex-worker`, review, and completion receipt. In another terminal,
+`model-team-watch` should transition through the matching phases and show an
+`ACTIVE` call only while the worker is running.
+
+## Safety and limitations
+
+- Codex full access is intentional for hardcore troubleshooting. The controller
+  announces it before dispatch, and the worker is the only writer.
+- Worker thread IDs are valid only while the owning MCP server process remains
+  alive. Finish repair rounds in the same run.
+- One repair round is normal. A second is allowed only for a confirmed critical
+  or high-severity finding.
+- Headroom statistics are machine-wide; use the instrumented worker watcher for
+  actual Codex-worker activity.
+- `headroom-canary` is experimental and opt-in.
+- Never run CLI `mempalace mine` or `graphify-reseed.sh` while Mempalace MCP is
+  live.
+- No secrets, tokens, credentials, memory databases, generated graphs, or local
+  `docs/` design files are tracked by this repository.

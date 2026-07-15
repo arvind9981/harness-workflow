@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # init.sh — reproduce my Claude Code workflow on a fresh machine.
 #
-#   git clone <this repo> && cd claude-workflow && ./init.sh
+#   git clone <this repo> && cd harness-workflow && ./init.sh
 #
 #   ./init.sh --help
 #   ./init.sh --codex
@@ -39,7 +39,7 @@ GRAPHIFY_EXTRA_REPOS="$HOME/app:$HOME/api" ./init.sh
                           when WSL_DISTRO_NAME is unavailable.
 
 Default:
-  With no graphify repos configured, init tracks this claude-workflow repo only.
+  With no graphify repos configured, init tracks this harness-workflow repo only.
 EOF
 }
 
@@ -82,6 +82,9 @@ CLAUDE_DIR="$HOME/.claude"
 BIN_DIR="$HOME/.local/bin"
 UNIT_DIR="$HOME/.config/systemd/user"      # systemd user units (Linux)
 LAUNCH_DIR="$HOME/Library/LaunchAgents"    # launchd LaunchAgents (macOS)
+HEADROOM_VERSION="${HEADROOM_VERSION:-0.31.0}"
+MEMPALACE_VERSION="${MEMPALACE_VERSION:-3.5.0}"
+GRAPHIFY_VERSION="${GRAPHIFY_VERSION:-0.9.16}"
 
 # Repos whose code graph is reseeded into mempalace (one graphify_<repo> wing
 # each, wipe-and-replace from graphify-out/GRAPH_REPORT.md), refreshed by the
@@ -123,26 +126,118 @@ backup() {  # backup <path> — copy aside once per run if it exists (first back
   return 0
 }
 
+replace_if_changed() { # replace_if_changed <rendered> <destination>
+  local rendered="$1" destination="$2"
+  if [ -f "$destination" ] && cmp -s "$rendered" "$destination"; then
+    rm -f "$rendered"
+    return 1
+  fi
+  mkdir -p "$(dirname "$destination")"
+  backup "$destination"
+  mv "$rendered" "$destination"
+  return 0
+}
+
+install_if_changed() { # install_if_changed <source> <destination> <mode>
+  local source_file="$1" destination="$2" mode="$3"
+  if [ -f "$destination" ] && cmp -s "$source_file" "$destination"; then
+    chmod "$mode" "$destination"
+    return 1
+  fi
+  mkdir -p "$(dirname "$destination")"
+  backup "$destination"
+  install -m "$mode" "$source_file" "$destination"
+  return 0
+}
+
+ensure_uv_tool() { # ensure_uv_tool <label> <command> <version> <uv-spec>
+  local label="$1" command="$2" version="$3" spec="$4" current=""
+  if command -v "$command" >/dev/null 2>&1; then
+    current="$("$command" --version 2>/dev/null || true)"
+  fi
+  if printf '%s' "$current" | grep -Eq "(^|[^0-9])${version//./\\.}([^0-9]|$)"; then
+    ok "$label $version already installed"
+    return 0
+  fi
+  uv tool install --force "$spec" >/dev/null 2>&1
+}
+
+reconcile_claude_md() { # preserve user text; own only the marked workflow block
+  local destination="$CLAUDE_DIR/CLAUDE.md" rendered
+  rendered="$(mktemp)"
+  python3 - "$destination" "$REPO_DIR/claude/CLAUDE.md" "$rendered" <<'PY'
+from pathlib import Path
+import re
+import sys
+
+destination, managed_path, output = map(Path, sys.argv[1:])
+current = destination.read_text(encoding="utf-8") if destination.exists() else ""
+managed = managed_path.read_text(encoding="utf-8").strip()
+block = re.compile(
+    r"<!-- BEGIN HARNESS-WORKFLOW MANAGED -->.*?"
+    r"<!-- END HARNESS-WORKFLOW MANAGED -->",
+    re.DOTALL,
+)
+current = re.sub(r"\n## graphify\n.*\Z", "", current, flags=re.DOTALL).strip()
+legacy = (
+    current.startswith("# Global instructions")
+    and "## Memory & tooling defaults" in current
+    and "Recall before re-deriving" in current
+)
+if block.search(current):
+    result = block.sub(managed, current).strip()
+elif legacy or not current:
+    result = managed
+else:
+    result = f"{current}\n\n{managed}"
+output.write_text(result + "\n", encoding="utf-8")
+PY
+  if replace_if_changed "$rendered" "$destination"; then
+    ok "CLAUDE.md managed workflow block reconciled"
+  else
+    ok "CLAUDE.md managed workflow block already current"
+  fi
+}
+
 svc_enable() {  # svc_enable <linux_unit_file> <mac_plist_file> — install + start a background service
   local linux_unit="$1" mac_plist="$2"
   if [ "$OS" = "Darwin" ]; then
     mkdir -p "$LAUNCH_DIR" "$HOME/Library/Logs"
     local dest; dest="$LAUNCH_DIR/$(basename "$mac_plist")"
-    backup "$dest"
-    sed "s#__HOME__#$HOME#g" "$mac_plist" > "$dest"   # launchd has no %h specifier
-    launchctl unload "$dest" 2>/dev/null || true
-    launchctl load -w "$dest" \
-      && ok "$(basename "$dest") loaded (launchd)" \
-      || die "launchctl load failed for $(basename "$dest")"
+    local rendered; rendered="$(mktemp)"
+    sed "s#__HOME__#$HOME#g" "$mac_plist" > "$rendered" # launchd has no %h specifier
+    if replace_if_changed "$rendered" "$dest"; then
+      launchctl unload "$dest" 2>/dev/null || true
+      if launchctl load -w "$dest"; then
+        ok "$(basename "$dest") loaded (launchd)"
+      else
+        die "launchctl load failed for $(basename "$dest")"
+      fi
+    elif launchctl list "$(basename "$dest" .plist)" >/dev/null 2>&1 \
+        || launchctl load -w "$dest"; then
+      ok "$(basename "$dest") already current and loaded (launchd)"
+    else
+      die "launchctl load failed for $(basename "$dest")"
+    fi
   else
     mkdir -p "$UNIT_DIR"
     local unit; unit="$(basename "$linux_unit")"
-    backup "$UNIT_DIR/$unit"
-    cp "$linux_unit" "$UNIT_DIR/$unit"
-    systemctl --user daemon-reload
-    systemctl --user enable --now "$unit" \
-      && ok "$unit enabled and started (systemd)" \
-      || die "systemctl enable failed for $unit"
+    if install_if_changed "$linux_unit" "$UNIT_DIR/$unit" 0644; then
+      systemctl --user daemon-reload
+      if systemctl --user enable --now "$unit"; then
+        ok "$unit enabled and started (systemd)"
+      else
+        die "systemctl enable failed for $unit"
+      fi
+    elif systemctl --user is-active --quiet "$unit"; then
+      ok "$unit already current and active (systemd)"
+    else
+      if systemctl --user enable --now "$unit"; then
+        ok "$unit started (systemd)"
+      else
+        die "systemctl enable failed for $unit"
+      fi
+    fi
   fi
 }
 
@@ -164,7 +259,9 @@ detect_windows_codex_dir() {  # Print the Windows Codex home as a WSL path, if u
 
   local windows_home=""
   if command -v cmd.exe >/dev/null 2>&1 && command -v wslpath >/dev/null 2>&1; then
-    windows_home="$(cd /mnt/c 2>/dev/null && cmd.exe /d /c "echo %USERPROFILE%" 2>/dev/null | tr -d '\r' | tail -n 1 || true)"
+    if ! windows_home="$(cd /mnt/c 2>/dev/null && cmd.exe /d /c "echo %USERPROFILE%" 2>/dev/null | tr -d '\r' | tail -n 1)"; then
+      windows_home=""
+    fi
     if [ -n "$windows_home" ]; then
       printf '%s/.codex\n' "$(wslpath -u "$windows_home")"
       return 0
@@ -333,8 +430,11 @@ step "Install headroom"
 # The [proxy] extra (fastapi/uvicorn) is REQUIRED — the systemd/launchd service runs
 # `headroom proxy`, which exits 1 without it. Plain `headroom-ai` leaves :8787 unbound
 # and Claude Code (ANTHROPIC_BASE_URL -> 127.0.0.1:8787) fails with ConnectionRefused.
-uv tool install --upgrade 'headroom-ai[proxy]' >/dev/null 2>&1 && ok "headroom-ai[proxy] installed/upgraded" \
-  || die "uv tool install 'headroom-ai[proxy]' failed"
+if ensure_uv_tool headroom headroom "$HEADROOM_VERSION" "headroom-ai[proxy]==$HEADROOM_VERSION"; then
+  ok "headroom-ai[proxy] pinned at $HEADROOM_VERSION"
+else
+  die "uv tool install headroom-ai[proxy]==$HEADROOM_VERSION failed"
+fi
 
 # ---------------------------------------------------------------------------
 step "Install mempalace (memory layer)"
@@ -342,10 +442,16 @@ step "Install mempalace (memory layer)"
 # The plugin auto-loads via settings.json; the CLI + native MCP server must be on
 # PATH for the plugin's MCP (.mcp.json calls `mempalace-mcp`) and its Stop/PreCompact
 # hooks (which call `mempalace`).
-uv tool install --upgrade mempalace >/dev/null 2>&1 && ok "mempalace installed/upgraded" \
-  || die "uv tool install mempalace failed"
-command -v mempalace-mcp >/dev/null 2>&1 && ok "mempalace-mcp (native MCP) present" \
-  || warn "mempalace-mcp missing — MCP wiring will fail"
+if ensure_uv_tool mempalace mempalace "$MEMPALACE_VERSION" "mempalace==$MEMPALACE_VERSION"; then
+  ok "mempalace pinned at $MEMPALACE_VERSION"
+else
+  die "uv tool install mempalace==$MEMPALACE_VERSION failed"
+fi
+if command -v mempalace-mcp >/dev/null 2>&1; then
+  ok "mempalace-mcp (native MCP) present"
+else
+  warn "mempalace-mcp missing — MCP wiring will fail"
+fi
 # Re-apply the HNSW divergence-threshold patch (chroma #6852). A `uv tool upgrade`
 # overwrites mempalace's site-packages, so this must run after every (re)install.
 # Idempotent + defensive: no-op if already patched, warns (does not fail) if the
@@ -359,10 +465,16 @@ step "Install graphify (code knowledge graph)"
 # (shipped in claude/settings.json) redirects search to the graph when one exists.
 # PyPI package is 'graphifyy' (double-y); the CLI is 'graphify'. Builds extract via
 # Claude subagents through the headroom proxy (no ollama, nothing to pin).
-uv tool install --upgrade graphifyy >/dev/null 2>&1 && ok "graphifyy installed/upgraded" \
-  || warn "uv tool install graphifyy failed — graphify features will be skipped"
-command -v graphify >/dev/null 2>&1 && ok "graphify CLI present" \
-  || warn "graphify missing — skill registration will be skipped"
+if ensure_uv_tool graphify graphify "$GRAPHIFY_VERSION" "graphifyy==$GRAPHIFY_VERSION"; then
+  ok "graphifyy pinned at $GRAPHIFY_VERSION"
+else
+  warn "uv tool install graphifyy==$GRAPHIFY_VERSION failed — graphify features will be skipped"
+fi
+if command -v graphify >/dev/null 2>&1; then
+  ok "graphify CLI present"
+else
+  warn "graphify missing — skill registration will be skipped"
+fi
 
 # ---------------------------------------------------------------------------
 step "Ignore graphify artifacts globally"
@@ -384,56 +496,94 @@ fi
 # ---------------------------------------------------------------------------
 step "Install scripts"
 mkdir -p "$BIN_DIR"
-backup "$BIN_DIR/headroom-watch"
-install -m 0755 "$REPO_DIR/tools/headroom/headroom-watch" "$BIN_DIR/headroom-watch"
+install_if_changed "$REPO_DIR/tools/headroom/headroom-watch" "$BIN_DIR/headroom-watch" 0755 || true
 ok "headroom-watch -> $BIN_DIR/headroom-watch"
-backup "$BIN_DIR/mempalace-prune.py"
-install -m 0755 "$REPO_DIR/tools/mempalace/mempalace-prune.py" "$BIN_DIR/mempalace-prune.py"
+install_if_changed "$REPO_DIR/tools/headroom/headroom-canary" "$BIN_DIR/headroom-canary" 0755 || true
+ok "headroom-canary -> $BIN_DIR/headroom-canary (opt-in :8788)"
+install_if_changed "$REPO_DIR/tools/mempalace/mempalace-prune.py" "$BIN_DIR/mempalace-prune.py" 0755 || true
 ok "mempalace-prune.py -> $BIN_DIR/mempalace-prune.py"
-backup "$BIN_DIR/graphify-reseed.sh"
-install -m 0755 "$REPO_DIR/tools/graphify/graphify-reseed.sh" "$BIN_DIR/graphify-reseed.sh"
+install_if_changed "$REPO_DIR/tools/graphify/graphify-reseed.sh" "$BIN_DIR/graphify-reseed.sh" 0755 || true
 ok "graphify-reseed.sh -> $BIN_DIR/graphify-reseed.sh"
-backup "$BIN_DIR/graphify-complete-map.sh"
-install -m 0755 "$REPO_DIR/tools/graphify/graphify-complete-map.sh" "$BIN_DIR/graphify-complete-map.sh"
+install_if_changed "$REPO_DIR/tools/graphify/graphify-complete-map.sh" "$BIN_DIR/graphify-complete-map.sh" 0755 || true
 ok "graphify-complete-map.sh -> $BIN_DIR/graphify-complete-map.sh"
-backup "$BIN_DIR/graphify-sync.sh"
-install -m 0755 "$REPO_DIR/tools/graphify/graphify-sync.sh" "$BIN_DIR/graphify-sync.sh"
+install_if_changed "$REPO_DIR/tools/graphify/graphify-sync.sh" "$BIN_DIR/graphify-sync.sh" 0755 || true
 ok "graphify-sync.sh -> $BIN_DIR/graphify-sync.sh"
-backup "$BIN_DIR/reseed-verify.sh"
-install -m 0755 "$REPO_DIR/tools/graphify/reseed-verify.sh" "$BIN_DIR/reseed-verify.sh"
+install_if_changed "$REPO_DIR/tools/graphify/reseed-verify.sh" "$BIN_DIR/reseed-verify.sh" 0755 || true
 ok "reseed-verify.sh -> $BIN_DIR/reseed-verify.sh"
-backup "$BIN_DIR/mempalace-snapshot.sh"
-install -m 0755 "$REPO_DIR/tools/mempalace/mempalace-snapshot.sh" "$BIN_DIR/mempalace-snapshot.sh"
+install_if_changed "$REPO_DIR/tools/mempalace/mempalace-snapshot.sh" "$BIN_DIR/mempalace-snapshot.sh" 0755 || true
 ok "mempalace-snapshot.sh -> $BIN_DIR/mempalace-snapshot.sh"
-backup "$BIN_DIR/mempalace-stop-timeout.sh"
-install -m 0755 "$REPO_DIR/tools/mempalace/mempalace-stop-timeout.sh" "$BIN_DIR/mempalace-stop-timeout.sh"
+install_if_changed "$REPO_DIR/tools/mempalace/mempalace-stop-timeout.sh" "$BIN_DIR/mempalace-stop-timeout.sh" 0755 || true
 ok "mempalace-stop-timeout.sh -> $BIN_DIR/mempalace-stop-timeout.sh"
-backup "$BIN_DIR/mempalace-stop-detach.sh"
-install -m 0755 "$REPO_DIR/tools/mempalace/mempalace-stop-detach.sh" "$BIN_DIR/mempalace-stop-detach.sh"
+install_if_changed "$REPO_DIR/tools/mempalace/mempalace-stop-detach.sh" "$BIN_DIR/mempalace-stop-detach.sh" 0755 || true
 ok "mempalace-stop-detach.sh -> $BIN_DIR/mempalace-stop-detach.sh"
 case ":$PATH:" in *":$BIN_DIR:"*) : ;; *) warn "$BIN_DIR is not on your PATH — add it to use the headroom CLI" ;; esac
 
 # ---------------------------------------------------------------------------
 step "Install Claude settings"
 mkdir -p "$CLAUDE_DIR"
-# settings.json: render __HOME__ placeholder -> real $HOME
-backup "$CLAUDE_DIR/settings.json"
-sed "s#__HOME__#$HOME#g" "$REPO_DIR/claude/settings.json" > "$CLAUDE_DIR/settings.json"
-ok "settings.json (paths resolved to $HOME)"
-# settings.local.json: sanitized allowlist, copy verbatim
-backup "$CLAUDE_DIR/settings.local.json"
-cp "$REPO_DIR/claude/settings.local.json" "$CLAUDE_DIR/settings.local.json"
-ok "settings.local.json ($(jq '.permissions.allow|length' "$CLAUDE_DIR/settings.local.json") allow rules)"
-# CLAUDE.md: global standing instructions, copy verbatim
-if [ -f "$REPO_DIR/claude/CLAUDE.md" ]; then
-  backup "$CLAUDE_DIR/CLAUDE.md"
-  cp "$REPO_DIR/claude/CLAUDE.md" "$CLAUDE_DIR/CLAUDE.md"
-  ok "CLAUDE.md (global standing instructions)"
+# Reconcile repo-owned keys while preserving personal permissions, plugins,
+# hooks, preferences, and instruction text.
+current_settings="$(mktemp)"
+managed_settings="$(mktemp)"
+merged_settings="$(mktemp)"
+[ -s "$CLAUDE_DIR/settings.json" ] && cp "$CLAUDE_DIR/settings.json" "$current_settings" \
+  || printf '{}\n' > "$current_settings"
+sed "s#__HOME__#$HOME#g" "$REPO_DIR/claude/settings.json" > "$managed_settings"
+if ! jq -s '
+  .[0] as $current | .[1] as $managed |
+  def owned_command:
+    test("headroom-init-claude|/\\.claude/hooks/(headroom-health|mempalace-|graphify-)");
+  $current
+  | .env = (($current.env // {}) + ($managed.env // {}))
+  | .enabledPlugins = (($current.enabledPlugins // {}) + ($managed.enabledPlugins // {}))
+  | .extraKnownMarketplaces = (($current.extraKnownMarketplaces // {}) + ($managed.extraKnownMarketplaces // {}))
+  | .statusLine = $managed.statusLine
+  | .theme = ($current.theme // $managed.theme)
+  | .hooks = reduce (($managed.hooks // {}) | to_entries[]) as $event
+      (($current.hooks // {});
+       .[$event.key] = (
+         [(.[$event.key] // [])[]
+          | .hooks = [(.hooks // [])[]
+              | select(((.command // "") | owned_command) | not)]
+          | select((.hooks | length) > 0)] + $event.value
+       ))
+' "$current_settings" "$managed_settings" > "$merged_settings"; then
+  rm -f "$current_settings" "$managed_settings" "$merged_settings"
+  die "Claude settings.json is not valid JSON"
 fi
+rm -f "$current_settings" "$managed_settings"
+if replace_if_changed "$merged_settings" "$CLAUDE_DIR/settings.json"; then
+  ok "settings.json workflow keys reconciled; unrelated settings preserved"
+else
+  ok "settings.json workflow keys already current"
+fi
+
+current_local="$(mktemp)"
+merged_local="$(mktemp)"
+[ -s "$CLAUDE_DIR/settings.local.json" ] && cp "$CLAUDE_DIR/settings.local.json" "$current_local" \
+  || printf '{}\n' > "$current_local"
+if ! jq -s '
+  .[0] as $current | .[1] as $managed |
+  $current
+  | .permissions = (($current.permissions // {}) + {
+      allow: (((($current.permissions // {}).allow // []) +
+        (($managed.permissions // {}).allow // [])) | unique)
+    })
+' "$current_local" "$REPO_DIR/claude/settings.local.json" > "$merged_local"; then
+  rm -f "$current_local" "$merged_local"
+  die "Claude settings.local.json is not valid JSON"
+fi
+rm -f "$current_local"
+if replace_if_changed "$merged_local" "$CLAUDE_DIR/settings.local.json"; then
+  ok "settings.local.json managed permissions merged; personal rules preserved"
+else
+  ok "settings.local.json managed permissions already current"
+fi
+
+reconcile_claude_md
 # statusline script: deploy to ~/.claude (referenced by settings.json statusLine.command)
 if [ -f "$REPO_DIR/claude/statusline-command.sh" ]; then
-  backup "$CLAUDE_DIR/statusline-command.sh"
-  install -m 0755 "$REPO_DIR/claude/statusline-command.sh" "$CLAUDE_DIR/statusline-command.sh"
+  install_if_changed "$REPO_DIR/claude/statusline-command.sh" "$CLAUDE_DIR/statusline-command.sh" 0755 || true
   ok "statusline-command.sh -> $CLAUDE_DIR/"
 fi
 # shared hooks: deploy repo-owned lifecycle scripts referenced by settings.json
@@ -441,8 +591,7 @@ if [ -d "$REPO_DIR/workflow/hooks" ]; then
   mkdir -p "$CLAUDE_DIR/hooks"
   for h in "$REPO_DIR"/workflow/hooks/*.sh; do
     [ -e "$h" ] || continue
-    backup "$CLAUDE_DIR/hooks/$(basename "$h")"
-    install -m 0755 "$h" "$CLAUDE_DIR/hooks/$(basename "$h")"
+    install_if_changed "$h" "$CLAUDE_DIR/hooks/$(basename "$h")" 0755 || true
     ok "hook $(basename "$h") -> $CLAUDE_DIR/hooks/"
   done
 fi
@@ -452,8 +601,7 @@ if [ -d "$REPO_DIR/claude/workflows" ]; then
   mkdir -p "$CLAUDE_DIR/workflows"
   for w in "$REPO_DIR"/claude/workflows/*.js; do
     [ -e "$w" ] || continue
-    backup "$CLAUDE_DIR/workflows/$(basename "$w")"
-    install -m 0644 "$w" "$CLAUDE_DIR/workflows/$(basename "$w")"
+    install_if_changed "$w" "$CLAUDE_DIR/workflows/$(basename "$w")" 0644 || true
     ok "workflow $(basename "$w") -> $CLAUDE_DIR/workflows/"
   done
 fi
@@ -506,9 +654,9 @@ else
 fi
 
 step "OpenCode workflow (auto-detected)"
-# OpenCode has its own plugin and MCP contract. If it is installed, deploy the
-# repo-owned adapter and let its installer register only the local Mempalace and
-# Headroom servers; if it is absent, leave the machine untouched.
+# OpenCode keeps its own native Sol/Terra agents. The installer adds the bounded
+# Claude worker MCP used for automatic Sonnet/Fable planning and review, pins
+# both provider paths through Headroom, and preserves unrelated user settings.
 if command -v opencode >/dev/null 2>&1; then
   bash "$REPO_DIR/tools/opencode/install-opencode.sh"
   if bash "$REPO_DIR/tools/opencode/doctor-workflow.sh"; then
@@ -516,7 +664,7 @@ if command -v opencode >/dev/null 2>&1; then
   else
     warn "OpenCode workflow installed; doctor reported local follow-up"
   fi
-  ok "OpenCode detected — workflow plugin, helpers, and local MCPs installed"
+  ok "OpenCode detected — native agents, automatic routing, and Claude worker MCP installed"
 else
   info "opencode not installed — skipping (nothing to migrate)"
 fi
@@ -578,9 +726,18 @@ step "Register graphify skill (Claude Code)"
 # claude/CLAUDE.md), so we do NOT run 'graphify claude install' — it is project-scoped
 # and would double-fire against the global hook.
 if command -v graphify >/dev/null 2>&1; then
-  backup "$CLAUDE_DIR/CLAUDE.md"
-  graphify install --platform claude >/dev/null 2>&1 && ok "graphify skill registered" \
-    || warn "graphify install failed"
+  graphify_skill_version="$CLAUDE_DIR/skills/graphify/.graphify_version"
+  if [ -f "$graphify_skill_version" ] \
+      && [ "$(cat "$graphify_skill_version")" = "$GRAPHIFY_VERSION" ]; then
+    ok "graphify skill $GRAPHIFY_VERSION already registered"
+  else
+    if graphify install --platform claude >/dev/null 2>&1; then
+      ok "graphify skill registered"
+    else
+      warn "graphify install failed"
+    fi
+    reconcile_claude_md
+  fi
   info "build a repo's graph with '/graphify .' (extraction routes via headroom)"
 else
   warn "graphify not installed — skipping skill registration"
@@ -592,7 +749,7 @@ if { [ "$OS" = "Darwin" ] && command -v launchctl >/dev/null 2>&1; } || command 
   svc_enable "$REPO_DIR/tools/headroom/headroom-proxy.service" "$REPO_DIR/tools/headroom/com.user.headroom-proxy.plist"
   [ "$OS" = "Darwin" ] || info "tip: 'loginctl enable-linger $USER' keeps the proxy alive without an active login"
 else
-  warn "skipped (no service manager). Run manually: headroom proxy --port 8787 --host 127.0.0.1"
+  warn "skipped (no service manager). Run manually: headroom proxy --port 8787 --host 127.0.0.1 --mode cache --no-cache"
 fi
 
 # ---------------------------------------------------------------------------
@@ -605,9 +762,11 @@ if [ -d "$HOME/.mempalace/palace" ]; then
   # Record the embedder identity (minilm) on legacy palaces that predate RFC 001.
   # Without it, every embedding op prints EmbedderIdentityUnknownWarning. Idempotent:
   # re-running just confirms the already-recorded identity. Does NOT re-embed.
-  mempalace palace set-embedder --model minilm >/dev/null 2>&1 \
-    && ok "mempalace embedder identity recorded (minilm)" \
-    || warn "could not record mempalace embedder identity"
+  if mempalace palace set-embedder --model minilm >/dev/null 2>&1; then
+    ok "mempalace embedder identity recorded (minilm)"
+  else
+    warn "could not record mempalace embedder identity"
+  fi
 else
   info "first-time setup (one-time, ~300MB model + indexing):"
   info "  mempalace init \"\$HOME\"                                  # create the global palace"
@@ -625,21 +784,27 @@ mkdir -p "$HOME/.mempalace/logs"
 if [ "$OS" = "Darwin" ] && command -v launchctl >/dev/null 2>&1; then
   dest="$LAUNCH_DIR/com.user.mempalace-prune.plist"
   mkdir -p "$LAUNCH_DIR"
-  backup "$dest"
-  sed "s#__HOME__#$HOME#g" "$REPO_DIR/tools/mempalace/com.user.mempalace-prune.plist" > "$dest"
-  launchctl unload "$dest" >/dev/null 2>&1 || true
-  launchctl load -w "$dest" && ok "daily prune scheduled (launchd, 03:47)" \
-    || warn "could not load prune plist"
+  rendered="$(mktemp)"
+  sed "s#__HOME__#$HOME#g" "$REPO_DIR/tools/mempalace/com.user.mempalace-prune.plist" > "$rendered"
+  if replace_if_changed "$rendered" "$dest"; then launchctl unload "$dest" >/dev/null 2>&1 || true; fi
+  if launchctl list com.user.mempalace-prune >/dev/null 2>&1 \
+      || launchctl load -w "$dest"; then
+    ok "daily prune scheduled (launchd, 03:47)"
+  else
+    warn "could not load prune plist"
+  fi
 elif command -v systemctl >/dev/null 2>&1; then
   mkdir -p "$UNIT_DIR"
+  units_changed=0
   for u in mempalace-prune.service mempalace-prune.timer; do
-    backup "$UNIT_DIR/$u"
-    cp "$REPO_DIR/tools/mempalace/$u" "$UNIT_DIR/$u"
+    if install_if_changed "$REPO_DIR/tools/mempalace/$u" "$UNIT_DIR/$u" 0644; then units_changed=1; fi
   done
-  systemctl --user daemon-reload
-  systemctl --user enable --now mempalace-prune.timer \
-    && ok "daily prune scheduled (systemd timer, 03:47)" \
-    || warn "could not enable mempalace-prune.timer"
+  [ "$units_changed" = 0 ] || systemctl --user daemon-reload
+  if systemctl --user enable --now mempalace-prune.timer; then
+    ok "daily prune scheduled (systemd timer, 03:47)"
+  else
+    warn "could not enable mempalace-prune.timer"
+  fi
 else
   warn "skipped (no scheduler). Run daily: mempalace's python on $BIN_DIR/mempalace-prune.py"
 fi
@@ -654,21 +819,27 @@ mkdir -p "$HOME/.mempalace/logs"
 if [ "$OS" = "Darwin" ] && command -v launchctl >/dev/null 2>&1; then
   dest="$LAUNCH_DIR/com.user.mempalace-snapshot.plist"
   mkdir -p "$LAUNCH_DIR"
-  backup "$dest"
-  sed "s#__HOME__#$HOME#g" "$REPO_DIR/tools/mempalace/com.user.mempalace-snapshot.plist" > "$dest"
-  launchctl unload "$dest" >/dev/null 2>&1 || true
-  launchctl load -w "$dest" && ok "6h snapshot scheduled (launchd)" \
-    || warn "could not load snapshot plist"
+  rendered="$(mktemp)"
+  sed "s#__HOME__#$HOME#g" "$REPO_DIR/tools/mempalace/com.user.mempalace-snapshot.plist" > "$rendered"
+  if replace_if_changed "$rendered" "$dest"; then launchctl unload "$dest" >/dev/null 2>&1 || true; fi
+  if launchctl list com.user.mempalace-snapshot >/dev/null 2>&1 \
+      || launchctl load -w "$dest"; then
+    ok "6h snapshot scheduled (launchd)"
+  else
+    warn "could not load snapshot plist"
+  fi
 elif command -v systemctl >/dev/null 2>&1; then
   mkdir -p "$UNIT_DIR"
+  units_changed=0
   for u in mempalace-snapshot.service mempalace-snapshot.timer; do
-    backup "$UNIT_DIR/$u"
-    cp "$REPO_DIR/tools/mempalace/$u" "$UNIT_DIR/$u"
+    if install_if_changed "$REPO_DIR/tools/mempalace/$u" "$UNIT_DIR/$u" 0644; then units_changed=1; fi
   done
-  systemctl --user daemon-reload
-  systemctl --user enable --now mempalace-snapshot.timer \
-    && ok "6h snapshot scheduled (systemd timer)" \
-    || warn "could not enable mempalace-snapshot.timer"
+  [ "$units_changed" = 0 ] || systemctl --user daemon-reload
+  if systemctl --user enable --now mempalace-snapshot.timer; then
+    ok "6h snapshot scheduled (systemd timer)"
+  else
+    warn "could not enable mempalace-snapshot.timer"
+  fi
 else
   warn "skipped (no scheduler). Run periodically: $BIN_DIR/mempalace-snapshot.sh"
 fi

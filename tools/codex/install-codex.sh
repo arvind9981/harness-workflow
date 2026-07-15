@@ -83,14 +83,43 @@ fi
 
 CODEX_BIN_DIR="$BIN_DIR" CODEX_EXISTING_PATH="${PATH:-}" CODEX_BACKUP_SUFFIX=".bak-codex-$STAMP" python3 - "$config" <<'PY'
 import os
+import json
 import re
 import shutil
 import sys
+import tomllib
 from pathlib import Path
 
 path = Path(sys.argv[1])
 text = path.read_text(encoding="utf-8")
 lines = text.splitlines()
+
+try:
+    parsed_config = tomllib.loads(text)
+except tomllib.TOMLDecodeError as exc:
+    raise SystemExit(f"install-codex: invalid TOML in {path}: {exc}")
+
+docker_config = parsed_config.get("mcp_servers", {}).get("MCP_DOCKER", {})
+docker_args = docker_config.get("args")
+normalized_mcp_args = None
+if (
+    docker_config.get("command") == "docker"
+    and isinstance(docker_args, list)
+    and docker_args[:3] == ["mcp", "gateway", "run"]
+):
+    normalized_mcp_args = []
+    index = 0
+    while index < len(docker_args):
+        arg = docker_args[index]
+        if arg == "--tools":
+            index += 2
+            continue
+        if isinstance(arg, str) and arg.startswith("--tools="):
+            index += 1
+            continue
+        normalized_mcp_args.append(arg)
+        index += 1
+    normalized_mcp_args.extend(["--tools", "mcp-exec"])
 
 bin_dir = os.environ["CODEX_BIN_DIR"]
 existing = os.environ.get("CODEX_EXISTING_PATH", "")
@@ -123,6 +152,7 @@ inserted_top = False
 mcp_section = "mcp_servers.MCP_DOCKER"
 seen_mcp = False
 inserted_mcp_timeout = False
+inserted_mcp_args = False
 
 def emit_desired(target: list[str]) -> None:
     for key, value in desired.items():
@@ -170,6 +200,12 @@ while i < len(lines):
 
     if section == mcp_section:
         stripped = line.lstrip()
+        if normalized_mcp_args is not None and re.match(r"^args\s*=", stripped):
+            if not inserted_mcp_args:
+                out.append(f"args = {json.dumps(normalized_mcp_args)}")
+                inserted_mcp_args = True
+            i += 1
+            continue
         if re.match(r"^startup_timeout_sec\s*=", stripped):
             if not inserted_mcp_timeout:
                 out.append("startup_timeout_sec = 60")
