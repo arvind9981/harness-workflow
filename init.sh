@@ -259,7 +259,9 @@ detect_windows_codex_dir() {  # Print the Windows Codex home as a WSL path, if u
 
   local windows_home=""
   if command -v cmd.exe >/dev/null 2>&1 && command -v wslpath >/dev/null 2>&1; then
-    windows_home="$(cd /mnt/c 2>/dev/null && cmd.exe /d /c "echo %USERPROFILE%" 2>/dev/null | tr -d '\r' | tail -n 1 || true)"
+    if ! windows_home="$(cd /mnt/c 2>/dev/null && cmd.exe /d /c "echo %USERPROFILE%" 2>/dev/null | tr -d '\r' | tail -n 1)"; then
+      windows_home=""
+    fi
     if [ -n "$windows_home" ]; then
       printf '%s/.codex\n' "$(wslpath -u "$windows_home")"
       return 0
