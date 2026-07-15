@@ -33,6 +33,10 @@ Environment:
   GRAPHIFY_EXTRA_REPOS    Colon-separated repo paths added to the reseed list.
                           Example:
 GRAPHIFY_EXTRA_REPOS="$HOME/app:$HOME/api" ./init.sh
+  CODEX_WINDOWS_DIR       Windows Codex home as a WSL path when auto-detection
+                          is ambiguous (for example /mnt/c/Users/me/.codex).
+  CODEX_WSL_DISTRO        WSL distro name used by Windows Codex hook/MCP commands
+                          when WSL_DISTRO_NAME is unavailable.
 
 Default:
   With no graphify repos configured, init tracks this claude-workflow repo only.
@@ -68,7 +72,12 @@ done
 REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 . "$REPO_DIR/tools/codex/lib.sh"
 STAMP="$(date +%Y%m%d-%H%M%S)"
-OS="$(uname -s)"                           # Linux | Darwin
+source "$REPO_DIR/tools/codex/platform.sh"
+if ! codex_detect_platform; then
+  printf 'init.sh: %s\n' "$PLATFORM_ERROR" >&2
+  exit 1
+fi
+OS="$PLATFORM_OS"                          # Linux | Darwin
 CLAUDE_DIR="$HOME/.claude"
 BIN_DIR="$HOME/.local/bin"
 UNIT_DIR="$HOME/.config/systemd/user"      # systemd user units (Linux)
@@ -135,6 +144,158 @@ svc_enable() {  # svc_enable <linux_unit_file> <mac_plist_file> — install + st
       && ok "$unit enabled and started (systemd)" \
       || die "systemctl enable failed for $unit"
   fi
+}
+
+detect_windows_codex_dir() {  # Print the Windows Codex home as a WSL path, if unambiguous.
+  [ "$IS_WSL" = 1 ] || return 1
+
+  if [ -n "${CODEX_WINDOWS_DIR:-}" ]; then
+    printf '%s\n' "$CODEX_WINDOWS_DIR"
+    return 0
+  fi
+
+  case "${CODEX_HOME:-}" in
+    [A-Za-z]:\\*)
+      command -v wslpath >/dev/null 2>&1 || return 1
+      wslpath -u "$CODEX_HOME"
+      return 0
+      ;;
+  esac
+
+  local windows_home=""
+  if command -v cmd.exe >/dev/null 2>&1 && command -v wslpath >/dev/null 2>&1; then
+    windows_home="$(cd /mnt/c 2>/dev/null && cmd.exe /d /c "echo %USERPROFILE%" 2>/dev/null | tr -d '\r' | tail -n 1 || true)"
+    if [ -n "$windows_home" ]; then
+      printf '%s/.codex\n' "$(wslpath -u "$windows_home")"
+      return 0
+    fi
+  fi
+
+  local candidates=() candidate
+  if [ -d /mnt/c/Users ]; then
+    while IFS= read -r candidate; do candidates+=("$(dirname "$candidate")"); done \
+      < <(find /mnt/c/Users -mindepth 3 -maxdepth 3 -type f -path '*/.codex/config.toml' 2>/dev/null)
+  fi
+  [ "${#candidates[@]}" -eq 1 ] || return 1
+  printf '%s\n' "${candidates[0]}"
+}
+
+install_windows_codex_bridge() {  # Bridge portable Codex workflow pieces into the Windows app.
+  local windows_codex_dir="$1" source_json="$REPO_DIR/codex/hooks.json"
+  local linux_rendered windows_rendered dest agents_dest src rel skill_dest
+  local config rendered_config
+  linux_rendered="$(mktemp "${TMPDIR:-/tmp}/codex-hooks-linux.XXXXXX")"
+  windows_rendered="$(mktemp "${TMPDIR:-/tmp}/codex-hooks-windows.XXXXXX")"
+  dest="$windows_codex_dir/hooks.json"
+
+  sed "s#__HOME__#$HOME#g" "$source_json" > "$linux_rendered"
+  if ! jq --arg distro "$WSL_DISTRO" '
+      .hooks |= with_entries(
+        .value |= map(
+          .hooks |= map(
+            .command = ("wsl.exe -d " + ($distro | @json)
+              + " --exec bash -lc " + (.command | @json))
+          )
+        )
+      )
+    ' "$linux_rendered" > "$windows_rendered"; then
+    rm -f "$linux_rendered" "$windows_rendered"
+    warn "could not render Windows Codex App hooks"
+    return 1
+  fi
+  rm -f "$linux_rendered"
+
+  mkdir -p "$windows_codex_dir"
+  if [ -f "$dest" ] && cmp -s "$windows_rendered" "$dest"; then
+    rm -f "$windows_rendered"
+    ok "Windows Codex App hooks already bridged ($dest)"
+  else
+    backup "$dest"
+    install -m 0644 "$windows_rendered" "$dest"
+    rm -f "$windows_rendered"
+    ok "Windows Codex App hooks -> $dest (WSL distro: $WSL_DISTRO)"
+  fi
+
+  agents_dest="$windows_codex_dir/AGENTS.md"
+  if [ ! -f "$agents_dest" ] || ! cmp -s "$REPO_DIR/codex/AGENTS.md" "$agents_dest"; then
+    backup "$agents_dest"
+    install -m 0644 "$REPO_DIR/codex/AGENTS.md" "$agents_dest"
+    ok "Windows Codex App AGENTS.md -> $agents_dest"
+  else
+    ok "Windows Codex App AGENTS.md already current"
+  fi
+
+  if [ -d "$REPO_DIR/workflow/skills" ]; then
+    while IFS= read -r -d '' src; do
+      rel="${src#"$REPO_DIR/workflow/skills/"}"
+      skill_dest="$windows_codex_dir/skills/$rel"
+      mkdir -p "$(dirname "$skill_dest")"
+      if [ ! -f "$skill_dest" ] || ! cmp -s "$src" "$skill_dest"; then
+        backup "$skill_dest"
+        if [ -x "$src" ]; then install -m 0755 "$src" "$skill_dest"
+        else install -m 0644 "$src" "$skill_dest"
+        fi
+      fi
+    done < <(find "$REPO_DIR/workflow/skills" -type f -print0)
+    ok "Windows Codex App workflow skills -> $windows_codex_dir/skills"
+  fi
+
+  config="$windows_codex_dir/config.toml"
+  rendered_config="$(mktemp "${TMPDIR:-/tmp}/codex-windows-config.XXXXXX")"
+  touch "$config"
+  if ! python3 - "$config" "$rendered_config" "$WSL_DISTRO" \
+      "$HOME/.local/bin/mempalace-mcp" "$HOME/.mempalace/palace" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+source, output, distro, command, palace = sys.argv[1:]
+text = Path(source).read_text(encoding="utf-8")
+lines = text.splitlines()
+result = []
+in_mempalace = False
+
+for line in lines:
+    stripped = line.strip()
+    if stripped.startswith("[") and stripped.endswith("]"):
+        section = stripped[1:-1]
+        if section == "mcp_servers.mempalace":
+            in_mempalace = True
+            continue
+        in_mempalace = False
+    if not in_mempalace:
+        result.append(line)
+
+while result and not result[-1].strip():
+    result.pop()
+if result:
+    result.append("")
+result.extend([
+    "[mcp_servers.mempalace]",
+    'command = "wsl.exe"',
+    "args = " + json.dumps([
+        "-d", distro, "--exec", command, "--palace", palace,
+    ]),
+    "startup_timeout_sec = 120",
+])
+Path(output).write_text("\n".join(result) + "\n", encoding="utf-8")
+PY
+  then
+    rm -f "$rendered_config"
+    warn "could not configure the Windows Codex App Mempalace MCP"
+    return 1
+  fi
+  if cmp -s "$rendered_config" "$config"; then
+    rm -f "$rendered_config"
+    ok "Windows Codex App Mempalace MCP already configured"
+  else
+    backup "$config"
+    install -m 0644 "$rendered_config" "$config"
+    rm -f "$rendered_config"
+    ok "Windows Codex App Mempalace MCP registered through WSL"
+  fi
+
+  info "fully restart the Codex App so it reloads AGENTS.md, skills, hooks, and MCPs"
 }
 
 # ---------------------------------------------------------------------------
@@ -298,27 +459,50 @@ if [ -d "$REPO_DIR/claude/workflows" ]; then
 fi
 
 step "Codex workflow (auto-detected)"
-# Codex may be installed on PATH or inside the ChatGPT/Codex macOS app bundle.
-# Automatic detection remains a non-fatal skip; --codex makes absence fatal.
+# The WSL CLI and Windows Codex App use different Codex homes. Install the shared
+# workflow into ~/.codex when either surface is found, while portable discovery
+# also covers CODEX_BIN, PATH, and supported macOS app bundles. The Windows app
+# receives a bridge whose commands explicitly re-enter this distro. Never copy
+# config.toml across: the app owns Windows-specific plugin and runtime paths there.
+WINDOWS_CODEX_DIR="$(detect_windows_codex_dir || true)"
 codex_bin="$(codex_resolve_bin || true)"
-if [ -n "$codex_bin" ]; then
-  CODEX_BIN="$codex_bin" bash "$REPO_DIR/tools/codex/install-codex.sh"
-  if CODEX_BIN="$codex_bin" bash "$REPO_DIR/tools/codex/doctor-workflow.sh"; then
+if [ -n "$codex_bin" ] || [ -n "$WINDOWS_CODEX_DIR" ]; then
+  if [ -n "$codex_bin" ]; then
+    CODEX_BIN="$codex_bin" bash "$REPO_DIR/tools/codex/install-codex.sh"
+    doctor_command=(env CODEX_BIN="$codex_bin" bash "$REPO_DIR/tools/codex/doctor-workflow.sh")
+  else
+    bash "$REPO_DIR/tools/codex/install-codex.sh"
+    doctor_command=(bash "$REPO_DIR/tools/codex/doctor-workflow.sh")
+  fi
+  if "${doctor_command[@]}"; then
     ok "Codex workflow verified"
   else
     warn "Codex workflow installed; doctor reported local follow-up"
   fi
-  ok "Codex detected at $codex_bin — hooks/instructions migrated into ~/.codex"
-  CODEX_BIN="$codex_bin" bash "$REPO_DIR/tools/model-team/install-model-team.sh"
-  if CODEX_BIN="$codex_bin" bash "$REPO_DIR/tools/model-team/doctor-model-team.sh"; then
-    ok "Claude–Codex model-team verified"
+
+  if [ -n "$codex_bin" ]; then
+    ok "Codex detected at $codex_bin — hooks/instructions migrated into ~/.codex"
+    CODEX_BIN="$codex_bin" bash "$REPO_DIR/tools/model-team/install-model-team.sh"
+    if CODEX_BIN="$codex_bin" bash "$REPO_DIR/tools/model-team/doctor-model-team.sh"; then
+      ok "Claude–Codex model-team verified"
+    else
+      warn "Model-team installed; doctor reported local follow-up"
+    fi
   else
-    warn "Model-team installed; doctor reported local follow-up"
+    ok "Windows Codex App detected — shared workflow migrated into ~/.codex"
+  fi
+
+  if [ -n "$WINDOWS_CODEX_DIR" ] && [ -n "$WSL_DISTRO" ]; then
+    install_windows_codex_bridge "$WINDOWS_CODEX_DIR" || warn "Windows Codex App bridge needs local follow-up"
+  elif [ "$IS_WSL" = 1 ] && [ -z "$WSL_DISTRO" ]; then
+    warn "WSL detected without a distro name; set CODEX_WSL_DISTRO and re-run init.sh for the Windows Codex bridge"
+  elif [ "$IS_WSL" = 1 ]; then
+    warn "WSL detected but the Windows Codex home was ambiguous; set CODEX_WINDOWS_DIR and re-run init.sh"
   fi
 elif [ "$INSTALL_CODEX" = 1 ]; then
-  die "--codex requested, but no Codex executable was found on PATH or in a supported macOS app bundle"
+  die "--codex requested, but no Codex CLI/App was found through portable discovery"
 else
-  info "codex not installed — skipping (nothing to migrate)"
+  info "Codex CLI/App not installed — skipping (nothing to migrate)"
 fi
 
 step "OpenCode workflow (auto-detected)"
