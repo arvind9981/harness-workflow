@@ -16,7 +16,7 @@ if [ "$(uname -s)" = "Darwin" ]; then
 else
   fix="systemctl --user restart headroom-proxy  (check: systemctl --user status headroom-proxy; keep it up across logout: loginctl enable-linger $USER)"
 fi
-msg="⚠️  headroom proxy not responding at ${URL} — Claude Code routes ANTHROPIC_BASE_URL through it, so API calls will fail with ConnectionRefused. Start it: ${fix}"
+msg="⚠️  headroom proxy not responding at ${URL} — this agent's proxied API calls will fail with ConnectionRefused. Start it: ${fix}"
 
 jq -cn --arg m "$msg" '{hookSpecificOutput:{hookEventName:"SessionStart",additionalContext:$m},systemMessage:$m}'
 exit 0

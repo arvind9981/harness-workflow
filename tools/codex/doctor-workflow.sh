@@ -4,15 +4,21 @@
 set -u
 
 REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+. "$REPO_DIR/tools/codex/lib.sh"
 CODEX_DIR="${CODEX_DIR:-$HOME/.codex}"
 CONF="${GRAPHIFY_REPOS_CONF:-$HOME/.mempalace/graphify-repos.conf}"
 PENDING="$HOME/.mempalace/hook_state/graphify-pending-mines"
 EMBEDDER="$HOME/.mempalace/palace/mempalace_embedder.json"
+RUNTIME="${CODEX_DOCTOR_RUNTIME:-1}"
+PYTHON_BIN="$(codex_python_resolve || true)"
 
 PASS=0
 WARN=0
 FAIL=0
 NEXT_ACTION=""
+NEED_INSTALL=0
+NEED_DOCKER=0
+NEED_GRAPHIFY=0
 
 pass() {
   PASS=$((PASS + 1))
@@ -27,7 +33,19 @@ warn() {
 
 fail() {
   FAIL=$((FAIL + 1))
-  NEXT_ACTION="Run ./tools/codex/install-codex.sh, then rerun this doctor."
+  NEED_INSTALL=1
+  printf 'FAIL %s\n' "$1"
+}
+
+docker_fail() {
+  FAIL=$((FAIL + 1))
+  NEED_DOCKER=1
+  printf 'FAIL %s\n' "$1"
+}
+
+graphify_fail() {
+  FAIL=$((FAIL + 1))
+  NEED_GRAPHIFY=1
   printf 'FAIL %s\n' "$1"
 }
 
@@ -35,21 +53,46 @@ have() {
   command -v "$1" >/dev/null 2>&1
 }
 
+run_bounded() {
+  local seconds="$1"
+  shift
+  "$PYTHON_BIN" - "$seconds" "$@" <<'PY'
+import subprocess
+import sys
+
+try:
+    result = subprocess.run(
+        sys.argv[2:],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        timeout=float(sys.argv[1]),
+        check=False,
+    )
+except subprocess.TimeoutExpired:
+    raise SystemExit(124)
+
+sys.stdout.write(result.stdout)
+raise SystemExit(result.returncode)
+PY
+}
+
 repo_root_of() {
   git -C "$1" rev-parse --show-toplevel 2>/dev/null || true
 }
 
 discover_repos() {
-  repo_root_of "$HOME/claude-workflow"
+  {
+    repo_root_of "$REPO_DIR"
+    for root in "$HOME/xebia" "$HOME/complion"; do
+      [ -d "$root" ] || continue
 
-  for root in "$HOME/xebia" "$HOME/complion"; do
-    [ -d "$root" ] || continue
-
-    for child in "$root"/*; do
-      [ -d "$child" ] || continue
-      repo_root_of "$child"
+      for child in "$root"/*; do
+        [ -d "$child" ] || continue
+        repo_root_of "$child"
+      done
     done
-  done | awk 'NF && !seen[$0]++' | sort
+  } | awk 'NF && !seen[$0]++' | sort
 }
 
 repo_list_contains() {
@@ -161,29 +204,194 @@ check_skill_installation() {
 
 check_codex_config() {
   local config="$CODEX_DIR/config.toml"
+  local parsed key value
+  local native_openai="" env_openai="" env_anthropic="" inherit=""
+  MCP_COMMAND=""
+  MCP_PROFILE=""
+  MCP_TIMEOUT=""
 
   if [ ! -f "$config" ]; then
     fail "$config missing"
     return
   fi
+  if [ -z "$PYTHON_BIN" ]; then
+    fail "Python 3.11+ with tomllib is required for safe Codex config parsing"
+    return
+  fi
 
-  # Accept single- or double-quoted (or unquoted) TOML values — Codex writes single quotes.
-  if grep -Eq "openai_base_url[[:space:]]*=[[:space:]]*['\"]?http://127\.0\.0\.1:8787/v1['\"]?" "$config"; then
+  parsed="$("$PYTHON_BIN" - "$config" <<'PY'
+import sys
+import tomllib
+
+with open(sys.argv[1], "rb") as fh:
+    config = tomllib.load(fh)
+
+policy = config.get("shell_environment_policy", {})
+env = policy.get("set", {})
+docker = config.get("mcp_servers", {}).get("MCP_DOCKER", {})
+args = docker.get("args", [])
+profile = ""
+for index, arg in enumerate(args):
+    if arg == "--profile" and index + 1 < len(args):
+        profile = str(args[index + 1])
+        break
+    if isinstance(arg, str) and arg.startswith("--profile="):
+        profile = arg.split("=", 1)[1]
+        break
+
+safe = {
+    "native_openai": config.get("openai_base_url", ""),
+    "env_openai": env.get("OPENAI_BASE_URL", ""),
+    "env_anthropic": env.get("ANTHROPIC_BASE_URL", ""),
+    "inherit": policy.get("inherit", ""),
+    "mcp_command": docker.get("command", ""),
+    "mcp_profile": profile,
+    "mcp_timeout": docker.get("startup_timeout_sec", ""),
+}
+for key, value in safe.items():
+    print(f"{key}\t{value}")
+PY
+)" || {
+    fail "$config is not valid TOML"
+    return
+  }
+
+  while IFS=$'\t' read -r key value; do
+    case "$key" in
+      native_openai) native_openai="$value" ;;
+      env_openai) env_openai="$value" ;;
+      env_anthropic) env_anthropic="$value" ;;
+      inherit) inherit="$value" ;;
+      mcp_command) MCP_COMMAND="$value" ;;
+      mcp_profile) MCP_PROFILE="$value" ;;
+      mcp_timeout) MCP_TIMEOUT="$value" ;;
+    esac
+  done <<EOF
+$parsed
+EOF
+
+  if [ "$native_openai" = "http://127.0.0.1:8787/v1" ]; then
     pass "Codex native openai_base_url routes through headroom"
   else
     fail "Codex native openai_base_url is not routed through headroom"
   fi
 
-  if grep -q 'OPENAI_BASE_URL.*http://127\.0\.0\.1:8787/v1' "$config"; then
+  if [ "$env_openai" = "http://127.0.0.1:8787/v1" ]; then
     pass "Codex OPENAI_BASE_URL routes through headroom"
   else
     warn "Codex OPENAI_BASE_URL not found in config env"
   fi
 
-  if grep -q 'ANTHROPIC_BASE_URL.*http://127\.0\.0\.1:8787' "$config"; then
+  if [ "$env_anthropic" = "http://127.0.0.1:8787" ]; then
     pass "Codex ANTHROPIC_BASE_URL routes through headroom"
   else
     warn "Codex ANTHROPIC_BASE_URL not found in config env"
+  fi
+
+  if [ "$inherit" = "all" ]; then
+    pass "Codex shell environment inherits all variables for troubleshooting"
+  else
+    fail "Codex shell environment inheritance is not all"
+  fi
+
+  case "$MCP_TIMEOUT" in
+    ''|*[!0-9]*) fail "MCP_DOCKER startup timeout is missing or invalid" ;;
+    *)
+      if [ "$MCP_TIMEOUT" -ge 60 ]; then
+        pass "MCP_DOCKER startup timeout is $MCP_TIMEOUT seconds"
+      else
+        fail "MCP_DOCKER startup timeout is below 60 seconds"
+      fi
+      ;;
+  esac
+}
+
+check_mcp_docker() {
+  local codex_bin codex_mcp profiles servers tool_count_output tool_count tools command_rc
+
+  codex_bin="$(codex_resolve_bin || true)"
+  if [ -z "$codex_bin" ]; then
+    docker_fail "Codex executable not found"
+    return
+  fi
+  pass "Codex executable resolved: $codex_bin"
+
+  if [ -z "$PYTHON_BIN" ]; then
+    docker_fail "Python 3.11+ with tomllib is required for bounded MCP checks"
+    return
+  fi
+
+  codex_mcp="$(run_bounded 20 "$codex_bin" mcp list 2>&1)"
+  command_rc=$?
+  if [ "$command_rc" -ne 0 ]; then
+    docker_fail "Codex MCP list failed"
+    return
+  fi
+  if printf '%s\n' "$codex_mcp" | grep -F 'MCP_DOCKER' | grep -Eqi 'enabled|true'; then
+    pass "MCP_DOCKER enabled in Codex"
+  else
+    docker_fail "MCP_DOCKER is not enabled in Codex"
+  fi
+
+  if [ "$MCP_COMMAND" != "docker" ]; then
+    docker_fail "MCP_DOCKER command is not docker"
+    return
+  fi
+  if [ -z "$MCP_PROFILE" ]; then
+    docker_fail "MCP_DOCKER has no configured profile"
+    return
+  fi
+  if ! have docker; then
+    docker_fail "docker missing"
+    return
+  fi
+
+  profiles="$(run_bounded 20 docker mcp profile list 2>&1)"
+  command_rc=$?
+  if [ "$command_rc" -ne 0 ]; then
+    docker_fail "Docker MCP profile lookup failed"
+    return
+  fi
+  if printf '%s\n' "$profiles" | grep -Fq "$MCP_PROFILE"; then
+    pass "Docker MCP profile available: $MCP_PROFILE"
+  else
+    docker_fail "Docker MCP profile unavailable: $MCP_PROFILE"
+  fi
+
+  servers="$(run_bounded 20 docker mcp profile server ls --filter "profile=$MCP_PROFILE" 2>&1)"
+  command_rc=$?
+  if [ "$command_rc" -ne 0 ]; then
+    docker_fail "Docker MCP server lookup failed"
+    return
+  fi
+  if printf '%s\n' "$servers" | grep -Fqi 'atlassian'; then
+    pass "Atlassian server enabled in profile: $MCP_PROFILE"
+  else
+    docker_fail "Atlassian server is not enabled in profile: $MCP_PROFILE"
+  fi
+
+  tool_count_output="$(run_bounded 30 docker mcp tools count "--gateway-arg=--profile=$MCP_PROFILE" 2>&1)"
+  command_rc=$?
+  if [ "$command_rc" -ne 0 ]; then
+    docker_fail "Docker MCP tool count failed"
+    return
+  fi
+  tool_count="$(printf '%s\n' "$tool_count_output" | awk '{for (i=1; i<=NF; i++) if ($i ~ /^[0-9]+$/) {print $i; exit}}')"
+  case "$tool_count" in
+    ''|0|*[!0-9]*) docker_fail "Docker MCP gateway returned no tools for profile: $MCP_PROFILE" ;;
+    *) pass "Docker MCP gateway exposes $tool_count tools" ;;
+  esac
+
+  tools="$(run_bounded 30 docker mcp tools ls --format=list "--gateway-arg=--profile=$MCP_PROFILE" 2>&1)"
+  command_rc=$?
+  if [ "$command_rc" -ne 0 ]; then
+    docker_fail "Docker MCP tool listing failed"
+    return
+  fi
+  if printf '%s\n' "$tools" | grep -Eq '(^|[[:space:]])jira_[[:alnum:]_]+'; then
+    pass "Docker MCP gateway exposes Jira tools"
+  else
+    docker_fail "Docker MCP gateway exposes no Jira tools"
   fi
 }
 
@@ -196,7 +404,9 @@ check_headroom() {
   fi
 
   local attempt
-  for attempt in 1 2 3; do
+  attempt=0
+  while [ "$attempt" -lt 3 ]; do
+    attempt=$((attempt + 1))
     if curl -fsS --max-time 5 http://127.0.0.1:8787/livez >/dev/null 2>&1 \
       && curl -fsS --max-time 5 http://127.0.0.1:8787/readyz >/dev/null 2>&1; then
       pass "headroom proxy live and ready on 127.0.0.1:8787"
@@ -232,7 +442,7 @@ check_graphify_config() {
   fi
 
   while IFS= read -r line; do
-    [ -n "$line" ] || continue
+    case "$line" in ''|'#'*) continue ;; esac
 
     if [ "$(repo_root_of "$line")" != "$line" ]; then
       printf '  invalid graphify repo: %s\n' "$line"
@@ -243,7 +453,17 @@ check_graphify_config() {
   if [ "$bad" -eq 0 ]; then
     pass "graphify repo config contains only repo roots"
   else
-    fail "graphify repo config contains non-repo paths"
+    graphify_fail "graphify repo config contains non-repo paths"
+  fi
+}
+
+check_repo_discovery() {
+  local workflow_root
+  workflow_root="$(repo_root_of "$REPO_DIR")"
+  if [ -n "$workflow_root" ] && repo_list_contains "$workflow_root"; then
+    pass "workflow repository included in discovery"
+  else
+    graphify_fail "workflow repository missing from discovery"
   fi
 }
 
@@ -270,7 +490,7 @@ check_stale_graphify_dirs() {
     printf '  stale graphify-out: %s\n' "$dir"
     stale=1
   done <<EOF
-$(for root in "$HOME/claude-workflow" "$HOME/xebia" "$HOME/complion"; do
+$(for root in "$REPO_DIR" "$HOME/xebia" "$HOME/complion"; do
   [ -d "$root" ] || continue
   find "$root" -maxdepth 4 -type d -name graphify-out 2>/dev/null
 done | sort)
@@ -320,20 +540,37 @@ check_hook_installation
 check_skill_installation
 check_fast_profile
 check_codex_config
-check_headroom
-check_command mempalace
-check_command mempalace-mcp
-check_command graphify
-check_embedder_sidecar
+check_mcp_docker
+if [ "$RUNTIME" != 0 ]; then
+  check_headroom
+  check_command mempalace
+  check_command mempalace-mcp
+  check_command graphify
+  check_embedder_sidecar
+fi
 check_graphify_config
+check_repo_discovery
 check_stale_graphify_dirs
-check_pending_mines
+if [ "$RUNTIME" != 0 ]; then
+  check_pending_mines
+fi
 check_git_state
-warn "MCP-native mempalace mining is not exposed to this shell doctor; CLI drain remains fallback"
 
 echo
 printf 'Summary: %s pass, %s warn, %s fail\n' "$PASS" "$WARN" "$FAIL"
 if [ "$FAIL" -gt 0 ]; then
+  NEXT_ACTION=""
+  if [ "$NEED_INSTALL" -eq 1 ]; then
+    NEXT_ACTION="Run ./tools/codex/install-codex.sh and rerun this doctor."
+  fi
+  if [ "$NEED_DOCKER" -eq 1 ]; then
+    [ -z "$NEXT_ACTION" ] || NEXT_ACTION="$NEXT_ACTION "
+    NEXT_ACTION="${NEXT_ACTION}Repair Docker MCP_DOCKER/profile readiness, then rerun this doctor."
+  fi
+  if [ "$NEED_GRAPHIFY" -eq 1 ]; then
+    [ -z "$NEXT_ACTION" ] || NEXT_ACTION="$NEXT_ACTION "
+    NEXT_ACTION="${NEXT_ACTION}Replace invalid Graphify roots with current git repository roots."
+  fi
   printf 'Next action: %s\n' "$NEXT_ACTION"
 elif [ "$WARN" -gt 0 ]; then
   printf 'Next action: %s\n' "$NEXT_ACTION"

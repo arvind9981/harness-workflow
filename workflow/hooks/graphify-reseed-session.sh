@@ -37,7 +37,6 @@ _age() {  # echo seconds since the timestamp in file $1 (or a huge number if abs
 echo "$now" > "$NUDGED"
 
 if [ -f "$STAMP" ]; then stale_desc="~$(( $(_age "$STAMP") / 3600 ))h stale"; else stale_desc="never refreshed"; fi
-repos="$(grep -vE '^[[:space:]]*(#|$)' "$CONF" | tr '\n' ' ')"
 
 # SessionStart additionalContext: a request the agent acts on early in the session.
 printf '%s' '{"hookSpecificOutput":{"hookEventName":"SessionStart","additionalContext":'

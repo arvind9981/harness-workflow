@@ -72,13 +72,19 @@ install_if_changed "$rendered" "$CODEX_DIR/hooks.json" 0644
 rm -f "$rendered"
 
 install_if_changed "$REPO_DIR/codex/AGENTS.md" "$CODEX_DIR/AGENTS.md" 0644
+mkdir -p "$CODEX_DIR/references"
+install_if_changed "$REPO_DIR/codex/references/memory-tooling.md" "$CODEX_DIR/references/memory-tooling.md" 0644
 install_if_changed "$REPO_DIR/codex/fast.config.toml" "$CODEX_DIR/fast.config.toml" 0644
 
 config="$CODEX_DIR/config.toml"
-touch "$config"
+if [ ! -e "$config" ]; then
+  (umask 077 && : > "$config")
+fi
 
 CODEX_BIN_DIR="$BIN_DIR" CODEX_EXISTING_PATH="${PATH:-}" CODEX_BACKUP_SUFFIX=".bak-codex-$STAMP" python3 - "$config" <<'PY'
 import os
+import re
+import shutil
 import sys
 from pathlib import Path
 
@@ -103,8 +109,9 @@ desired_top = {
 
 def section_of(line: str):
     s = line.strip()
-    if s.startswith("[") and s.endswith("]"):
-        return s.strip("[]")
+    match = re.match(r"^\[([^]]+)\](?:\s*#.*)?$", s)
+    if match:
+        return match.group(1)
     return None
 
 out: list[str] = []
@@ -113,6 +120,9 @@ seen_policy = False
 seen_set = False
 inserted = False
 inserted_top = False
+mcp_section = "mcp_servers.MCP_DOCKER"
+seen_mcp = False
+inserted_mcp_timeout = False
 
 def emit_desired(target: list[str]) -> None:
     for key, value in desired.items():
@@ -129,6 +139,9 @@ while i < len(lines):
     line = lines[i]
     next_section = section_of(line)
     if next_section is not None:
+      if section == mcp_section and not inserted_mcp_timeout:
+          out.append("startup_timeout_sec = 60")
+          inserted_mcp_timeout = True
       if section == "" and not inserted_top:
           emit_desired_top(out)
           inserted_top = True
@@ -136,6 +149,7 @@ while i < len(lines):
           emit_desired(out)
           inserted = True
       section = next_section
+      seen_mcp = seen_mcp or section == mcp_section
       seen_policy = seen_policy or section == "shell_environment_policy"
       seen_set = seen_set or section == "shell_environment_policy.set"
       out.append(line)
@@ -154,6 +168,15 @@ while i < len(lines):
             i += 1
             continue
 
+    if section == mcp_section:
+        stripped = line.lstrip()
+        if re.match(r"^startup_timeout_sec\s*=", stripped):
+            if not inserted_mcp_timeout:
+                out.append("startup_timeout_sec = 60")
+                inserted_mcp_timeout = True
+            i += 1
+            continue
+
     out.append(line)
     i += 1
 
@@ -165,10 +188,14 @@ if section == "shell_environment_policy.set" and not inserted:
     emit_desired(out)
     inserted = True
 
+if section == mcp_section and not inserted_mcp_timeout:
+    out.append("startup_timeout_sec = 60")
+    inserted_mcp_timeout = True
+
 if not seen_policy:
     if out and out[-1].strip():
         out.append("")
-    out.extend(["[shell_environment_policy]", 'inherit = "core"'])
+    out.extend(["[shell_environment_policy]", 'inherit = "all"'])
 
 if not seen_set:
     if out and out[-1].strip():
@@ -180,8 +207,11 @@ new_text = "\n".join(out).rstrip() + "\n"
 if new_text != text:
     suffix = os.environ.get("CODEX_BACKUP_SUFFIX", "")
     if suffix and text:
-        Path(str(path) + suffix).write_text(text, encoding="utf-8")
+        shutil.copy2(path, Path(str(path) + suffix))
     path.write_text(new_text, encoding="utf-8")
+
+if not seen_mcp:
+    print("install-codex: MCP_DOCKER table not found; startup timeout left unmanaged", file=sys.stderr)
 PY
 
 printf 'Codex workflow installed into %s (%s hook/instruction file(s) updated)\n' "$CODEX_DIR" "$CHANGED"
