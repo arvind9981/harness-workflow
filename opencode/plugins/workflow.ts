@@ -7,17 +7,17 @@ const CONFIG_DIR = process.env.OPENCODE_CONFIG_DIR ?? `${HOME}/.config/opencode`
 const HOOK_DIR = `${CONFIG_DIR}/harness-workflow/hooks`
 const RECAP_DIR = `${HOME}/.mempalace/recaps`
 const PRIMARY_AGENTS = new Set(["build", "plan"])
-const started = new Set<string>()
-const sessionAgents = new Map<string, string>()
-const recalls = new Map<string, string>()
-const prompts = new Map<string, string[]>()
+const started = new Set()
+const sessionAgents = new Map()
+const recalls = new Map()
+const prompts = new Map()
 
-const slug = (directory: string) =>
+const slug = (directory) =>
   directory.replace(/[^A-Za-z0-9]+/g, "_").replace(/^_+|_+$/g, "") || "root"
 
-const primary = (sessionID: string) => PRIMARY_AGENTS.has(sessionAgents.get(sessionID) ?? "")
+const primary = (sessionID) => PRIMARY_AGENTS.has(sessionAgents.get(sessionID) ?? "")
 
-const additionalContext = (raw: string) => {
+const additionalContext = (raw) => {
   try {
     return JSON.parse(raw)?.hookSpecificOutput?.additionalContext ?? ""
   } catch {
@@ -25,7 +25,7 @@ const additionalContext = (raw: string) => {
   }
 }
 
-const runHook = async (name: string, payload: Record<string, unknown>, cwd: string) => {
+const runHook = async (name, payload, cwd) => {
   const proc = Bun.spawn(["bash", `${HOOK_DIR}/${name}`], {
     cwd,
     stdin: new Blob([JSON.stringify(payload)]),
@@ -37,7 +37,7 @@ const runHook = async (name: string, payload: Record<string, unknown>, cwd: stri
   return additionalContext(output)
 }
 
-const sessionRecap = async (directory: string) => {
+const sessionRecap = async (directory) => {
   try {
     return await Bun.file(`${RECAP_DIR}/opencode-${slug(directory)}.json`).json()
   } catch {
@@ -45,7 +45,7 @@ const sessionRecap = async (directory: string) => {
   }
 }
 
-const writeRecap = async (directory: string, sessionID: string) => {
+const writeRecap = async (directory, sessionID) => {
   const recent = prompts.get(sessionID) ?? []
   if (recent.length === 0) return
   const path = `${RECAP_DIR}/opencode-${slug(directory)}.json`
@@ -59,17 +59,17 @@ const writeRecap = async (directory: string, sessionID: string) => {
   await chmod(path, 0o600)
 }
 
-export const WorkflowPlugin = async ({ directory }: { directory: string }) => ({
+export const WorkflowPlugin = async ({ directory }) => ({
   "chat.message": async (
-    input: { sessionID: string; agent?: string },
-    output: { parts: Array<{ type: string; text?: string }> },
+    input,
+    output,
   ) => {
     if (input.agent) sessionAgents.set(input.sessionID, input.agent)
     if (!primary(input.sessionID)) return
 
     const prompt = output.parts
       .filter((part) => part.type === "text" && typeof part.text === "string")
-      .map((part) => part.text!.trim())
+      .map((part) => part.text.trim())
       .filter(Boolean)
       .join("\n")
     if (!prompt) return
@@ -81,13 +81,13 @@ export const WorkflowPlugin = async ({ directory }: { directory: string }) => ({
     if (recall) recalls.set(input.sessionID, recall)
   },
 
-  "chat.params": async (input: { sessionID: string; agent: string }) => {
+  "chat.params": async (input) => {
     sessionAgents.set(input.sessionID, input.agent)
   },
 
   "experimental.chat.system.transform": async (
-    input: { sessionID?: string },
-    output: { system: string[] },
+    input,
+    output,
   ) => {
     const sessionID = input.sessionID ?? ""
     if (!sessionID || !primary(sessionID)) return
@@ -103,7 +103,7 @@ export const WorkflowPlugin = async ({ directory }: { directory: string }) => ({
       if (Array.isArray(recap?.prompts) && recap.prompts.length > 0) {
         output.system.push(
           `Previous OpenCode session for ${slug(directory)}:\n` +
-            recap.prompts.map((prompt: string) => `- ${prompt}`).join("\n"),
+            recap.prompts.map((prompt) => `- ${prompt}`).join("\n"),
         )
       }
     }
@@ -115,13 +115,13 @@ export const WorkflowPlugin = async ({ directory }: { directory: string }) => ({
     }
   },
 
-  "tool.execute.after": async (input: { tool: string; sessionID: string }) => {
+  "tool.execute.after": async (input) => {
     if (primary(input.sessionID) && ["edit", "write", "apply_patch"].includes(input.tool)) {
       await runHook("graphify-autoupdate.sh", { cwd: directory }, directory)
     }
   },
 
-  event: async ({ event }: { event: { type: string; properties?: { sessionID?: string } } }) => {
+  event: async ({ event }) => {
     const sessionID = event.properties?.sessionID ?? ""
     if (event.type === "session.idle" && sessionID) {
       try {

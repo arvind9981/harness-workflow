@@ -269,7 +269,11 @@ class ClaudeWorker:
             with self.lock:
                 config = self.sessions.get(session_id)
             if config is None:
-                raise ValueError("unknown or expired sessionId")
+                raise ValueError(
+                    "sessionId is not owned by this worker process; "
+                    "finish review in the originating OpenCode command or "
+                    "start a fresh Claude session"
+                )
             role = REVIEW_ROLE[config["role"]]
             return self._run(
                 role=role,

@@ -1,7 +1,7 @@
 ---
 description: On-demand durable-memory worker for bounded Mempalace recall
 mode: subagent
-model: openai/gpt-5.6-luna
+model: openai/gpt-5.6-terra
 reasoningEffort: low
 steps: 8
 permission:

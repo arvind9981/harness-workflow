@@ -43,7 +43,7 @@ snamed(){ local n; n=$(grep -cE '^### Community [0-9]+ - ' "$1/GRAPH_REPORT.md" 
   [ -x "$HELPER" ] || { echo "ABORT: helper missing/not executable: $HELPER"; echo "STATUS: ABORTED_NO_HELPER"; echo "=== END ==="; exit 1; }
 
   pass=0; fail=0
-  declare -a MINE
+  MINE=()
   for d in "${REPOS[@]}"; do
     leaf="$(basename "$d")"
     wing="graphify_${leaf//[^a-zA-Z0-9_-]/_}"
@@ -71,7 +71,9 @@ snamed(){ local n; n=$(grep -cE '^### Community [0-9]+ - ' "$1/GRAPH_REPORT.md" 
 
   echo "--- SUMMARY: $pass passed, $fail failed ---"
   echo "--- NEXT (Claude): mine each staged report via the in-process MCP mine tool, then confirm wings via list_wings + a named-community search ---"
-  for m in "${MINE[@]}"; do echo "$m"; done
+  if [ "${#MINE[@]}" -gt 0 ]; then
+    for m in "${MINE[@]}"; do echo "$m"; done
+  fi
   if [ "$fail" -eq 0 ] && [ "$pass" -gt 0 ]; then echo "STATUS: PASS_PENDING_MCP_MINE"; else echo "STATUS: FAIL"; fi
   echo "=== END ==="
 } 2>&1 | tee "$LOG"

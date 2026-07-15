@@ -3,27 +3,41 @@ name: verify
 on:
   pull_request:
   push:
-    branches: [main]
+    branches: [master]
 
 permissions:
   contents: read
 
 jobs:
   workflow:
-    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
-      - name: Install validation tools
+      - name: Install validation tools (Ubuntu)
+        if: runner.os == 'Linux'
         run: sudo apt-get update && sudo apt-get install -y jq shellcheck
+      - name: Install validation tools (macOS)
+        if: runner.os == 'macOS'
+        run: brew install jq shellcheck
       - name: Run isolated workflow tests
         run: |
-          bash tools/codex/test-workflow.sh
-          bash tools/model-team/test-model-team.sh
-          bash tools/opencode/test-workflow.sh
+          TEST_BASH=bash
+          if [ "$RUNNER_OS" = macOS ]; then TEST_BASH=/bin/bash; fi
+          "$TEST_BASH" tools/codex/test-workflow.sh
+          "$TEST_BASH" tools/model-team/test-model-team.sh
+          "$TEST_BASH" tools/opencode/test-workflow.sh
       - name: Validate scripts and configuration
         run: |
-          bash -n init.sh tools/update-versions.sh tools/**/*.sh
+          TEST_BASH=bash
+          if [ "$RUNNER_OS" = macOS ]; then TEST_BASH=/bin/bash; fi
+          "$TEST_BASH" -n init.sh tools/update-versions.sh tools/**/*.sh
           shellcheck -x init.sh tools/headroom/headroom-canary \
+            tools/headroom/headroom-watch tools/graphify/graphify-sync.sh \
+            tools/graphify/reseed-verify.sh tools/codex/services.sh tools/codex/wsl.sh \
             tools/update-versions.sh \
             tools/model-team/doctor-model-team.sh tools/model-team/model-team-watch \
             tools/model-team/test-model-team.sh tools/opencode/doctor-workflow.sh \

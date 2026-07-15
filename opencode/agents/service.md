@@ -1,7 +1,7 @@
 ---
 description: On-demand live-service worker for Docker MCP tools; never loaded into ordinary repository work
 mode: subagent
-model: openai/gpt-5.6-luna
+model: openai/gpt-5.6-terra
 reasoningEffort: low
 steps: 12
 permission:

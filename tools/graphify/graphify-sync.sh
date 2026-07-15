@@ -37,6 +37,11 @@ else
   done < "$CONF"
 fi
 
+if [ "${#REPOS[@]}" -eq 0 ]; then
+  echo "graphify-sync: no repositories configured"
+  exit 0
+fi
+
 # node:edge signature from the report (stable across labeling). Extract the two
 # numbers separately to avoid matching the multibyte "·" separator. Empty if no report.
 sig_of() {
@@ -66,7 +71,9 @@ for d in "${REPOS[@]}"; do
   if [ "$cur" = "$prev" ]; then
     # Unchanged: wing is already correct. `update` just reset the disk report to
     # placeholders, so restore the named staged copy to keep disk == wing.
-    [ -f "$stage/GRAPH_REPORT.md" ] && cp "$stage/GRAPH_REPORT.md" "$d/graphify-out/GRAPH_REPORT.md" 2>/dev/null || true
+    if [ -f "$stage/GRAPH_REPORT.md" ]; then
+      cp "$stage/GRAPH_REPORT.md" "$d/graphify-out/GRAPH_REPORT.md" 2>/dev/null || true
+    fi
     echo "SKIP $leaf (unchanged: $cur)"
     continue
   fi

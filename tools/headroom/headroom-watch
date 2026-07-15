@@ -56,7 +56,11 @@ render() {
 
   if [ -z "$json" ]; then
     printf '\n  \033[31m✗ headroom proxy unreachable at %s\033[0m\n' "$URL"
-    printf '    is the service up?  systemctl --user status headroom-proxy\n\n'
+    if [ "${HEADROOM_WATCH_OS:-$(uname -s)}" = Darwin ]; then
+      printf '    is the service up?  launchctl print gui/%s/com.user.headroom-proxy\n\n' "$(id -u)"
+    else
+      printf '    is the service up?  systemctl --user status headroom-proxy\n\n'
+    fi
     return
   fi
 

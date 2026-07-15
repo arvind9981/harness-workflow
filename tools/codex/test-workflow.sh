@@ -94,6 +94,251 @@ test_platform() {
     'init explains that Windows users must use WSL'
 }
 
+test_portability() {
+  local tmp fake_bin output detected first_hash second_hash first_backups second_backups rc tool_path
+  local services="$REPO_DIR/tools/codex/services.sh"
+  local wsl="$REPO_DIR/tools/codex/wsl.sh"
+  local workflow="$REPO_DIR/.github/workflows/verify.yml"
+  local stock_bash="/bin/bash"
+
+  tmp="$(mktemp -d "${TMPDIR:-/tmp}/codex-portability.XXXXXX")"
+  fake_bin="$tmp/bin"
+  mkdir -p "$fake_bin" "$tmp/home/.mempalace" "$tmp/home/.local/bin" \
+    "$tmp/mnt/c" "$tmp/windows-codex"
+  : > "$tmp/home/.mempalace/empty-repos.conf"
+
+  if [ -x "$stock_bash" ]; then
+    output="$(HOME="$tmp/home" GRAPHIFY_REPOS_CONF="$tmp/home/.mempalace/empty-repos.conf" \
+      "$stock_bash" "$REPO_DIR/tools/graphify/graphify-sync.sh" 2>&1)"
+    rc=$?
+    if [ "$rc" -eq 0 ] && printf '%s\n' "$output" | grep -Fq 'no repositories configured'; then
+      pass 'Graphify sync accepts an empty repo list on stock Bash'
+    else
+      fail 'Graphify sync accepts an empty repo list on stock Bash'
+    fi
+
+    cat > "$tmp/home/.local/bin/graphify-complete-map.sh" <<'EOF'
+#!/usr/bin/env bash
+exit 1
+EOF
+    chmod +x "$tmp/home/.local/bin/graphify-complete-map.sh"
+    mkdir -p "$tmp/empty-repo"
+    output="$(HOME="$tmp/home" RESEED_VERIFY_LOG="$tmp/reseed.log" \
+      "$stock_bash" "$REPO_DIR/tools/graphify/reseed-verify.sh" "$tmp/empty-repo" 2>&1)"
+    rc=$?
+    if printf '%s\n' "$output" | grep -Fq 'STATUS: FAIL' \
+        && ! printf '%s\n' "$output" | grep -Fq 'unbound variable'; then
+      pass 'Reseed verification handles zero mine results on stock Bash'
+    else
+      fail 'Reseed verification handles zero mine results on stock Bash'
+    fi
+  else
+    fail 'stock Bash executable is available for portability checks'
+  fi
+  assert_file_contains "$REPO_DIR/init.sh" 'if [ "${#GRAPHIFY_REPOS[@]}" -gt 0 ]; then' \
+    'init guards empty Graphify arrays for stock Bash'
+
+  if [ -f "$services" ]; then
+    pass 'service-manager helper exists'
+  else
+    fail 'service-manager helper exists'
+  fi
+  cat > "$fake_bin/systemctl" <<'EOF'
+#!/usr/bin/env bash
+printf 'systemctl %s\n' "$*" >> "$TEST_LOG"
+if [ "$*" = '--user show-environment' ]; then
+  [ "${SYSTEMCTL_USER_READY:-0}" = 1 ]
+  exit $?
+fi
+if [ "$*" = '--user is-active --quiet headroom-proxy.service' ]; then
+  [ "${SYSTEMCTL_SERVICE_ACTIVE:-0}" = 1 ]
+  exit $?
+fi
+exit 0
+EOF
+  cat > "$fake_bin/launchctl" <<'EOF'
+#!/usr/bin/env bash
+printf 'launchctl %s\n' "$*" >> "$TEST_LOG"
+case "${1:-}" in
+  list) exit 1 ;;
+esac
+exit 0
+EOF
+  chmod +x "$fake_bin/systemctl" "$fake_bin/launchctl"
+
+  if [ -f "$services" ]; then
+    output="$(PATH="$fake_bin:/usr/bin:/bin" TEST_LOG="$tmp/service.log" \
+      SYSTEMCTL_USER_READY=1 bash -c '. "$1"; codex_service_manager Linux' _ "$services")"
+    assert_eq systemd "$output" 'native Linux selects a functioning systemd user manager'
+    output="$(PATH="$fake_bin:/usr/bin:/bin" TEST_LOG="$tmp/service.log" \
+      SYSTEMCTL_USER_READY=0 bash -c '. "$1"; codex_service_manager Linux' _ "$services")"
+    assert_eq none "$output" 'Linux skips a non-functioning systemd user manager'
+    output="$(PATH="$fake_bin:/usr/bin:/bin" TEST_LOG="$tmp/service.log" \
+      bash -c '. "$1"; codex_service_manager Darwin' _ "$services")"
+    assert_eq launchd "$output" 'macOS selects launchd'
+
+    : > "$tmp/service.log"
+    HOME="$tmp/home" PATH="$fake_bin:/usr/bin:/bin" TEST_LOG="$tmp/service.log" \
+      REPO_DIR="$REPO_DIR" UNIT_DIR="$tmp/units" LAUNCH_DIR="$tmp/launch" \
+      bash -c '
+        backup() { :; }
+        ok() { :; }
+        warn() { :; }
+        replace_if_changed() { mkdir -p "$(dirname "$2")"; mv "$1" "$2"; return 0; }
+        install_if_changed() { mkdir -p "$(dirname "$2")"; cp "$1" "$2"; chmod "$3" "$2"; return 0; }
+        . "$1"
+        codex_enable_service launchd "$REPO_DIR/tools/headroom/headroom-proxy.service" "$REPO_DIR/tools/headroom/com.user.headroom-proxy.plist"
+        codex_enable_timer launchd "daily prune scheduled" "$REPO_DIR/tools/mempalace/mempalace-prune.service" "$REPO_DIR/tools/mempalace/mempalace-prune.timer" "$REPO_DIR/tools/mempalace/com.user.mempalace-prune.plist"
+        codex_enable_timer launchd "6h snapshot scheduled" "$REPO_DIR/tools/mempalace/mempalace-snapshot.service" "$REPO_DIR/tools/mempalace/mempalace-snapshot.timer" "$REPO_DIR/tools/mempalace/com.user.mempalace-snapshot.plist"
+      ' _ "$services"
+    assert_file_contains "$tmp/service.log" 'launchctl load -w' 'launchd service and scheduler branches execute'
+
+    : > "$tmp/service.log"
+    HOME="$tmp/home" PATH="$fake_bin:/usr/bin:/bin" TEST_LOG="$tmp/service.log" \
+      REPO_DIR="$REPO_DIR" UNIT_DIR="$tmp/units" LAUNCH_DIR="$tmp/launch" \
+      bash -c '
+        backup() { :; }
+        ok() { :; }
+        warn() { :; }
+        replace_if_changed() { return 1; }
+        install_if_changed() { mkdir -p "$(dirname "$2")"; cp "$1" "$2"; chmod "$3" "$2"; return 0; }
+        . "$1"
+        codex_enable_service systemd "$REPO_DIR/tools/headroom/headroom-proxy.service" "$REPO_DIR/tools/headroom/com.user.headroom-proxy.plist"
+        codex_enable_timer systemd "daily prune scheduled" "$REPO_DIR/tools/mempalace/mempalace-prune.service" "$REPO_DIR/tools/mempalace/mempalace-prune.timer" "$REPO_DIR/tools/mempalace/com.user.mempalace-prune.plist"
+        codex_enable_timer systemd "6h snapshot scheduled" "$REPO_DIR/tools/mempalace/mempalace-snapshot.service" "$REPO_DIR/tools/mempalace/mempalace-snapshot.timer" "$REPO_DIR/tools/mempalace/com.user.mempalace-snapshot.plist"
+      ' _ "$services"
+    assert_file_contains "$tmp/service.log" 'systemctl --user enable --now headroom-proxy.service' \
+      'systemd Headroom service branch executes'
+    assert_file_contains "$tmp/service.log" 'systemctl --user enable --now mempalace-prune.timer' \
+      'systemd prune scheduler branch executes'
+    assert_file_contains "$tmp/service.log" 'systemctl --user enable --now mempalace-snapshot.timer' \
+      'systemd snapshot scheduler branch executes'
+
+    : > "$tmp/service.log"
+    HOME="$tmp/home" PATH="$fake_bin:/usr/bin:/bin" TEST_LOG="$tmp/service.log" \
+      SYSTEMCTL_SERVICE_ACTIVE=1 REPO_DIR="$REPO_DIR" UNIT_DIR="$tmp/units" \
+      LAUNCH_DIR="$tmp/launch" bash -c '
+        backup() { :; }
+        ok() { :; }
+        warn() { :; }
+        install_if_changed() { return 0; }
+        . "$1"
+        codex_enable_service systemd "$REPO_DIR/tools/headroom/headroom-proxy.service" "$REPO_DIR/tools/headroom/com.user.headroom-proxy.plist"
+      ' _ "$services"
+    assert_file_contains "$tmp/service.log" 'systemctl --user restart headroom-proxy.service' \
+      'systemd restarts a changed service that is already active'
+  fi
+
+  if [ -f "$wsl" ]; then
+    pass 'WSL bridge helper exists'
+  else
+    fail 'WSL bridge helper exists'
+  fi
+  cat > "$fake_bin/cmd.exe" <<'EOF'
+#!/usr/bin/env bash
+printf 'C:\\Users\\Test\r\n'
+EOF
+  cat > "$fake_bin/wslpath" <<'EOF'
+#!/usr/bin/env bash
+case "${2:-}" in
+  'D:\Codex') printf '/mnt/d/Codex\n' ;;
+  *) printf '/mnt/c/Users/Test\n' ;;
+esac
+EOF
+  cat > "$fake_bin/wsl.exe" <<'EOF'
+#!/usr/bin/env bash
+printf 'wsl.exe %s\n' "$*" >> "$TEST_LOG"
+EOF
+  chmod +x "$fake_bin/cmd.exe" "$fake_bin/wslpath" "$fake_bin/wsl.exe"
+  if [ -f "$wsl" ]; then
+    tool_path="$(dirname "$(command -v jq)"):$(dirname "$(command -v python3)"):/usr/bin:/bin"
+    detected="$(PATH="$fake_bin:/usr/bin:/bin" IS_WSL=1 CODEX_WINDOWS_MOUNT="$tmp/mnt/c" \
+      bash -c '. "$1"; detect_windows_codex_dir' _ "$wsl")"
+    assert_eq '/mnt/c/Users/Test/.codex' "$detected" 'WSL discovers the Windows Codex home through cmd.exe'
+    detected="$(PATH="$fake_bin:/usr/bin:/bin" IS_WSL=1 CODEX_WINDOWS_DIR=/custom/codex \
+      bash -c '. "$1"; detect_windows_codex_dir' _ "$wsl")"
+    assert_eq '/custom/codex' "$detected" 'WSL honors an explicit Windows Codex directory'
+    detected="$(PATH="$fake_bin:/usr/bin:/bin" IS_WSL=1 CODEX_HOME='D:\Codex' \
+      bash -c '. "$1"; detect_windows_codex_dir' _ "$wsl")"
+    assert_eq '/mnt/d/Codex' "$detected" 'WSL converts a Windows CODEX_HOME with wslpath'
+
+    mkdir -p "$tmp/fallback/Users/One/.codex"
+    : > "$tmp/fallback/Users/One/.codex/config.toml"
+    detected="$(PATH="/usr/bin:/bin" IS_WSL=1 CODEX_WINDOWS_MOUNT="$tmp/fallback" \
+      bash -c '. "$1"; detect_windows_codex_dir' _ "$wsl")"
+    assert_eq "$tmp/fallback/Users/One/.codex" "$detected" \
+      'WSL accepts one discovered Windows Codex home'
+    mkdir -p "$tmp/fallback/Users/Two/.codex"
+    : > "$tmp/fallback/Users/Two/.codex/config.toml"
+    if PATH="/usr/bin:/bin" IS_WSL=1 CODEX_WINDOWS_MOUNT="$tmp/fallback" \
+        bash -c '. "$1"; detect_windows_codex_dir' _ "$wsl" >/dev/null 2>&1; then
+      fail 'WSL rejects ambiguous Windows Codex homes'
+    else
+      pass 'WSL rejects ambiguous Windows Codex homes'
+    fi
+
+    cat > "$tmp/windows-codex/config.toml" <<'EOF'
+[mcp_servers.personal]
+command = "keep-me"
+enabled = false
+EOF
+    PATH="$fake_bin:$tool_path" HOME="$tmp/home" REPO_DIR="$REPO_DIR" \
+      WSL_DISTRO=Ubuntu TEST_LOG="$tmp/wsl.log" bash -c '
+        backup() { [ ! -e "$1" ] || cp -p "$1" "$1.bak-test"; }
+        ok() { :; }
+        info() { :; }
+        warn() { printf "%s\n" "$*" >&2; }
+        . "$1"
+        install_windows_codex_bridge "$2"
+      ' _ "$wsl" "$tmp/windows-codex"
+    first_hash="$(hash_file "$tmp/windows-codex/config.toml")|$(hash_file "$tmp/windows-codex/hooks.json")"
+    first_backups="$(find "$tmp/windows-codex" -type f -name '*.bak-test' | wc -l | tr -d ' ')"
+    PATH="$fake_bin:$tool_path" HOME="$tmp/home" REPO_DIR="$REPO_DIR" \
+      WSL_DISTRO=Ubuntu TEST_LOG="$tmp/wsl.log" bash -c '
+        backup() { [ ! -e "$1" ] || [ -e "$1.bak-test" ] || cp -p "$1" "$1.bak-test"; }
+        ok() { :; }
+        info() { :; }
+        warn() { printf "%s\n" "$*" >&2; }
+        . "$1"
+        install_windows_codex_bridge "$2"
+      ' _ "$wsl" "$tmp/windows-codex"
+    second_hash="$(hash_file "$tmp/windows-codex/config.toml")|$(hash_file "$tmp/windows-codex/hooks.json")"
+    second_backups="$(find "$tmp/windows-codex" -type f -name '*.bak-test' | wc -l | tr -d ' ')"
+    assert_eq "$first_hash" "$second_hash" 'WSL bridge rendering is idempotent'
+    assert_eq "$first_backups" "$second_backups" 'second WSL bridge run creates no backups'
+    assert_file_contains "$tmp/windows-codex/config.toml" '[mcp_servers.personal]' \
+      'WSL bridge preserves unrelated Codex configuration'
+    assert_file_contains "$tmp/windows-codex/config.toml" 'command = "wsl.exe"' \
+      'WSL bridge registers Mempalace through wsl.exe'
+    assert_file_contains "$tmp/windows-codex/hooks.json" 'wsl.exe -d' \
+      'WSL bridge renders hooks through the selected distro'
+  fi
+
+  assert_file_contains "$workflow" 'branches: [master]' 'CI runs for pushes to the default branch'
+  assert_file_contains "$workflow" 'ubuntu-latest' 'CI validates Ubuntu'
+  assert_file_contains "$workflow" 'macos-latest' 'CI validates macOS'
+  assert_file_contains "$workflow" '/bin/bash' 'macOS CI explicitly exercises stock Bash'
+  assert_file_contains "$REPO_DIR/README.md" '`init.sh` supports macOS, Linux, and WSL' \
+    'README explicitly documents WSL support'
+  assert_file_contains "$REPO_DIR/README.md" 'On WSL, it uses `systemd --user` when available' \
+    'README documents the WSL systemd path'
+  assert_file_contains "$REPO_DIR/README.md" 'prints manual service commands' \
+    'README documents the WSL service fallback'
+  assert_file_contains "$REPO_DIR/README.md" 'Windows Codex App bridge' \
+    'README documents the optional Windows Codex bridge'
+
+  : > "$tmp/empty-stats.json"
+  output="$(HEADROOM_STATS_FILE="$tmp/empty-stats.json" HEADROOM_HEALTH_FILE="$tmp/empty-stats.json" \
+    HEADROOM_WATCH_OS=Darwin "$REPO_DIR/tools/headroom/headroom-watch" --once 2>&1)"
+  assert_text_contains "$output" 'launchctl print gui/' 'Headroom watcher gives a macOS recovery command'
+  output="$(HEADROOM_STATS_FILE="$tmp/empty-stats.json" HEADROOM_HEALTH_FILE="$tmp/empty-stats.json" \
+    HEADROOM_WATCH_OS=Linux "$REPO_DIR/tools/headroom/headroom-watch" --once 2>&1)"
+  assert_text_contains "$output" 'systemctl --user status headroom-proxy' \
+    'Headroom watcher gives a Linux recovery command'
+
+  rm -rf "$tmp"
+}
+
 hash_file() {
   if command -v shasum >/dev/null 2>&1; then
     shasum -a 256 "$1" | awk '{print $1}'
@@ -685,12 +930,13 @@ test_versions() {
 }
 
 usage() {
-  printf 'Usage: %s {platform|instructions|discovery|installer|hooks|doctor|versions|all}\n' "$0" >&2
+  printf 'Usage: %s {platform|portability|instructions|discovery|installer|hooks|doctor|versions|all}\n' "$0" >&2
 }
 
 group="${1:-all}"
 case "$group" in
   platform) test_platform ;;
+  portability) test_portability ;;
   instructions) test_instructions ;;
   discovery) test_discovery ;;
   installer) test_installer ;;
@@ -699,6 +945,7 @@ case "$group" in
   versions) test_versions ;;
   all)
     test_platform
+    test_portability
     test_instructions
     test_discovery
     test_installer

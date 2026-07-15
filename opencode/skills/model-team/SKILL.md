@@ -36,8 +36,9 @@ reasons, then dispatch automatically.
    subagent for bounded Mempalace recall and retain at most five distilled bullets.
 2. Call `claude-worker_claude` with the selected role, objective, constraints,
    acceptance criteria, distilled context, likely files, and verification.
-3. Retain its `sessionId`. Use at most two independent `explore` or `scout`
-   tasks when reconnaissance is genuinely useful.
+3. Retain its `sessionId`. It is valid only for the current OpenCode command
+   because the Claude MCP worker owns it in memory. Use at most two independent
+   `explore` or `scout` tasks when reconnaissance is genuinely useful.
 4. Implement sequentially as Sol. Collect the actual diff and command exit
    codes; never trust summaries alone.
 5. Call `claude-worker_claude-reply` with the retained session and actual
@@ -45,6 +46,10 @@ reasons, then dispatch automatically.
    confirmed critical or high finding.
 6. Independently rerun verification and report the route, changed files, tests,
    and remaining risks.
+
+Complete required review and repair rounds before the current OpenCode command exits.
+For a separately requested later review, start a fresh Claude session and provide
+the new evidence snapshot; do not reuse a session ID from a completed command.
 
 Never allow concurrent writers, nested model-team runs, Claude writes, or raw
 transcript and memory forwarding.
