@@ -198,9 +198,3 @@ interactively. Claude Code is installed separately. Codex and OpenCode are optio
 - Codex full-access execution is intentional for hardcore troubleshooting. The
   controller announces it before dispatch, and only one writer is allowed.
 - `init.sh` does not commit, push, or create branches.
-
-## Design references
-
-- [Codex setup optimization](docs/superpowers/specs/2026-07-14-codex-setup-optimization-design.md)
-- [Portable Claude-Codex model team](docs/superpowers/specs/2026-07-15-portable-model-team-design.md)
-- [Model-team observability](docs/superpowers/specs/2026-07-15-model-team-observability-design.md)

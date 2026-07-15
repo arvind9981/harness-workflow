@@ -28,3 +28,6 @@ mempalace-data/
 # Visual-plan artifacts and block reference (specs — on-disk reference only)
 /plans/
 /plan-blocks.md
+
+# Local design and implementation artifacts — never commit
+/docs/
