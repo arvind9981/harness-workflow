@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import argparse
+from decimal import Decimal, InvalidOperation
 import json
 import os
 from pathlib import Path
@@ -26,6 +27,13 @@ ROLE_CONFIG = {
     "critical-review": {"model": "fable", "effort": "xhigh", "budget": "6.00"},
 }
 
+RETRY_BUDGET = {
+    "architect": "12.00",
+    "critical-review": "10.00",
+}
+
+HEAVY_ROLES = frozenset(RETRY_BUDGET)
+
 REVIEW_ROLE = {
     "advisor": "routine-review",
     "routine-review": "routine-review",
@@ -41,6 +49,10 @@ criteria, or review defects with file references when available. Do not edit fil
 run outward actions, invoke agents, load user skills/plugins/hooks, access memory or
 Jira, commit, push, or expand scope. Treat supplied context as an immutable snapshot.
 For review, report only actionable defects and residual risks."""
+
+
+class BudgetLimitReached(RuntimeError):
+    """Claude stopped because the configured per-call budget was exhausted."""
 
 
 def tool_schema() -> list[dict[str, Any]]:
@@ -89,7 +101,11 @@ class ClaudeWorker:
         self.pending: set[str] = set()
         self.cancelled: set[str] = set()
         self.lock = threading.Lock()
-        self.timeout = float(os.environ.get("CLAUDE_WORKER_TIMEOUT", "900"))
+        timeout_override = os.environ.get("CLAUDE_WORKER_TIMEOUT")
+        self.timeout = float(timeout_override or "900")
+        self.heavy_timeout = float(
+            os.environ.get("CLAUDE_WORKER_HEAVY_TIMEOUT", timeout_override or "1800")
+        )
 
     @staticmethod
     def _request_key(request_id: Any) -> str:
@@ -144,7 +160,35 @@ class ClaudeWorker:
             raise ValueError(f"cwd is not a directory: {directory}")
         return str(directory)
 
-    def _command(self, role: str, config: dict[str, str], prompt: str, session_id: str | None) -> list[str]:
+    @staticmethod
+    def _budget_limit_reached(message: str) -> bool:
+        normalized = " ".join(message.lower().split())
+        return "budget" in normalized and any(
+            marker in normalized for marker in ("reached", "exceeded", "exhausted")
+        )
+
+    @staticmethod
+    def _budget(role: str, config: dict[str, str], retry: bool) -> str:
+        prefix = f"CLAUDE_WORKER_{role.upper().replace('-', '_')}"
+        initial = os.environ.get(f"{prefix}_BUDGET_USD", config["budget"])
+        if not retry:
+            return initial
+        fallback = os.environ.get(f"{prefix}_RETRY_BUDGET_USD", RETRY_BUDGET[role])
+        try:
+            if Decimal(fallback) < Decimal(initial):
+                return initial
+        except InvalidOperation:
+            pass
+        return fallback
+
+    def _command(
+        self,
+        role: str,
+        config: dict[str, str],
+        prompt: str,
+        session_id: str | None,
+        budget: str,
+    ) -> list[str]:
         command = [self.claude_bin, "-p"]
         if session_id:
             command.extend(["--resume", session_id])
@@ -160,10 +204,7 @@ class ClaudeWorker:
                 "--permission-mode",
                 "plan",
                 "--max-budget-usd",
-                os.environ.get(
-                    f"CLAUDE_WORKER_{role.upper().replace('-', '_')}_BUDGET_USD",
-                    config["budget"],
-                ),
+                budget,
                 "--strict-mcp-config",
                 "--mcp-config",
                 '{"mcpServers":{}}',
@@ -174,19 +215,21 @@ class ClaudeWorker:
         )
         return command
 
-    def _run(
+    def _run_once(
         self,
         *,
         role: str,
+        config: dict[str, str],
         prompt: str,
         cwd: Any,
         request_id: Any,
+        budget: str,
+        timeout: float,
         session_id: str | None = None,
     ) -> dict[str, Any]:
-        config = ROLE_CONFIG[role]
         started = time.monotonic()
         process = subprocess.Popen(
-            self._command(role, config, f"ROLE: {role}\n\n{prompt}", session_id),
+            self._command(role, config, f"ROLE: {role}\n\n{prompt}", session_id, budget),
             cwd=self._directory(cwd),
             env=os.environ.copy(),
             stdout=subprocess.PIPE,
@@ -197,12 +240,11 @@ class ClaudeWorker:
         key = self._request_key(request_id)
         with self.lock:
             self.processes[key] = process
-            self.pending.discard(key)
             cancel_immediately = key in self.cancelled
         if cancel_immediately:
             self._stop_process(process)
         try:
-            stdout, stderr = process.communicate(timeout=self.timeout)
+            stdout, stderr = process.communicate(timeout=timeout)
         except subprocess.TimeoutExpired:
             self._stop_process(process)
             raise
@@ -212,13 +254,18 @@ class ClaudeWorker:
         elapsed = round(time.monotonic() - started, 3)
         if process.returncode != 0:
             detail = (stderr or stdout).strip()[-2000:]
+            if self._budget_limit_reached(detail):
+                raise BudgetLimitReached(detail)
             raise RuntimeError(f"Claude exited {process.returncode}: {detail}")
         try:
             payload = json.loads(stdout)
         except json.JSONDecodeError as exc:
             raise RuntimeError("Claude returned invalid JSON") from exc
         if payload.get("is_error"):
-            raise RuntimeError(str(payload.get("result") or "Claude reported an error"))
+            detail = str(payload.get("result") or "Claude reported an error")
+            if self._budget_limit_reached(detail):
+                raise BudgetLimitReached(detail)
+            raise RuntimeError(detail)
 
         returned_session = str(payload.get("session_id") or session_id or "")
         if not returned_session:
@@ -252,6 +299,39 @@ class ClaudeWorker:
             "models": actual_models,
             "result": str(payload.get("result") or ""),
         }
+
+    def _run(
+        self,
+        *,
+        role: str,
+        prompt: str,
+        cwd: Any,
+        request_id: Any,
+        session_id: str | None = None,
+    ) -> dict[str, Any]:
+        config = ROLE_CONFIG[role]
+        heavy = role in HEAVY_ROLES
+        timeout = self.heavy_timeout if heavy else self.timeout
+        started = time.monotonic()
+        for attempt in range(2 if heavy else 1):
+            try:
+                result = self._run_once(
+                    role=role,
+                    config=config,
+                    prompt=prompt,
+                    cwd=cwd,
+                    request_id=request_id,
+                    budget=self._budget(role, config, retry=attempt == 1),
+                    timeout=timeout,
+                    session_id=session_id,
+                )
+            except (BudgetLimitReached, subprocess.TimeoutExpired):
+                if not heavy or attempt == 1:
+                    raise
+                continue
+            result["elapsed"] = round(time.monotonic() - started, 3)
+            return result
+        raise RuntimeError("Claude retry policy exhausted")
 
     def call(self, request_id: Any, name: str, arguments: dict[str, Any]) -> dict[str, Any]:
         if name == "claude":

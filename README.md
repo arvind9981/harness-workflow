@@ -166,9 +166,19 @@ reasoning, Headroom, and full-access safety settings. Only one writer may run at
 a time; nested model-team invocation is forbidden.
 
 The OpenCode Claude worker starts with `--safe-mode`, no user plugins or hooks,
-and no MCP servers. Default per-call spend ceilings are USD 4 for advice, USD 3
-for routine review, USD 8 for architecture, and USD 6 for critical review.
-Environment variables named `CLAUDE_WORKER_<ROLE>_BUDGET_USD` can override them.
+and no MCP servers. This isolation applies only to the read-only Claude worker;
+Sol remains the OpenCode writer and troubleshooter. First-attempt spend ceilings
+remain USD 4 for advice, USD 3 for routine review, USD 8 for architecture, and
+USD 6 for critical review. Standard calls time out after 15 minutes. Architecture
+and critical-review calls receive 30 minutes and retry once only after a confirmed
+budget or timeout failure, using ceilings of USD 12 and USD 10 respectively.
+
+`CLAUDE_WORKER_<ROLE>_BUDGET_USD` overrides a first-attempt budget. The fallback
+values can be changed with `CLAUDE_WORKER_ARCHITECT_RETRY_BUDGET_USD` and
+`CLAUDE_WORKER_CRITICAL_REVIEW_RETRY_BUDGET_USD`. Set
+`CLAUDE_WORKER_TIMEOUT` to override all call timeouts, or
+`CLAUDE_WORKER_HEAVY_TIMEOUT` to override only the high-risk roles. Export these
+variables before starting OpenCode so its MCP worker inherits them.
 
 ## Tool guide
 
