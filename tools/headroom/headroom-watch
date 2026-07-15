@@ -28,7 +28,21 @@ while [ $# -gt 0 ]; do
   esac
 done
 
-fetch() { curl -fsS --max-time 4 "$URL/stats" 2>/dev/null; }
+fetch() {
+  if [ -n "${HEADROOM_STATS_FILE:-}" ]; then
+    cat "$HEADROOM_STATS_FILE"
+  else
+    curl -fsS --max-time 4 "$URL/stats" 2>/dev/null
+  fi
+}
+
+fetch_health() {
+  if [ -n "${HEADROOM_HEALTH_FILE:-}" ]; then
+    cat "$HEADROOM_HEALTH_FILE"
+  else
+    curl -fsS --max-time 4 "$URL/health" 2>/dev/null
+  fi
+}
 
 if [ "$RAW" = 1 ]; then
   fetch | jq .
@@ -38,7 +52,7 @@ fi
 render() {
   local json health hup
   json="$(fetch || true)"
-  health="$(curl -fsS --max-time 4 "$URL/health" 2>/dev/null || true)"
+  health="$(fetch_health || true)"
 
   if [ -z "$json" ]; then
     printf '\n  \033[31m✗ headroom proxy unreachable at %s\033[0m\n' "$URL"
@@ -53,8 +67,15 @@ render() {
     def fmt: n | tostring;
     .summary as $s
     | $s.compression as $c
-    | "[1m  headroom \(.summary.mode // "?") mode[0m  ·  model \($s.primary_model // "?")"
+    | ([.request_logs[]? | select(((.tags.client // "") | length) > 0)]
+       | sort_by(.timestamp) | last // {}) as $latest
+    | "[1m  headroom \(.summary.mode // "?") mode[0m"
       + (if ($up|length)>0 then "  ·  up \(($up|tonumber|floor/60*10|floor)/10)m" else "" end),
+      "  latest \($latest.model // $s.primary_model // "?")"
+        + "  ·  client \($latest.tags.client // $latest.provider // "?")"
+        + (if (($latest.timestamp // "") | length) > 0
+           then "  ·  at \($latest.timestamp | capture("T(?<time>[0-9:]+)").time)"
+           else "" end),
       "  ────────────────────────────────────────────────",
       "  api requests          \($s.api_requests | fmt)",
       "  requests compressed   \($c.requests_compressed | fmt)   (avg \($c.avg_compression_pct|n)% · best \($c.best_compression_pct|n)%)",

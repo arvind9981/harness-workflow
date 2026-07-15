@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Shared platform detection for init.sh. Tests may override the probes with
 # INIT_UNAME_S, INIT_PROC_VERSION, and INIT_WSL_INTEROP.
+# shellcheck disable=SC2034 # Detection results are exported to scripts that source this file.
 
 codex_detect_platform() {
   local kernel proc_version interop

@@ -4,6 +4,7 @@
 #   git clone <this repo> && cd claude-workflow && ./init.sh
 #
 #   ./init.sh --help
+#   ./init.sh --codex
 #   ./init.sh --graphify-repo "$HOME/project-a"
 #
 # No secrets travel with this repo. After running, start `claude` and log in
@@ -20,6 +21,7 @@ Usage: ./init.sh [options]
 Reproduce this Claude/Codex workflow on the current machine.
 
 Options:
+  --codex                Require Codex setup; fail if no Codex executable is found.
   --desktop               Wire the mempalace MCP server into Claude Desktop (macOS; default).
   --no-desktop            Skip Claude Desktop MCP wiring.
   --graphify-repo PATH    Add a repo to the graphify->mempalace reseed list.
@@ -42,9 +44,11 @@ EOF
 }
 
 INSTALL_DESKTOP=1
+INSTALL_CODEX=auto
 GRAPHIFY_REPOS=()
 while [ "$#" -gt 0 ]; do
   case "$1" in
+    --codex) INSTALL_CODEX=1 ;;
 --desktop) INSTALL_DESKTOP=1 ;;
 --no-desktop) INSTALL_DESKTOP=0 ;;
     --graphify-repo)
@@ -66,6 +70,7 @@ done
 
 # ---------------------------------------------------------------------------
 REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+. "$REPO_DIR/tools/codex/lib.sh"
 STAMP="$(date +%Y%m%d-%H%M%S)"
 source "$REPO_DIR/tools/codex/platform.sh"
 if ! codex_detect_platform; then
@@ -455,18 +460,38 @@ fi
 
 step "Codex workflow (auto-detected)"
 # The WSL CLI and Windows Codex App use different Codex homes. Install the shared
-# workflow into ~/.codex when either surface is found, then give the Windows app a
-# hooks.json whose commands explicitly re-enter this distro. Never copy config.toml
-# across: the app owns Windows-specific plugin and runtime paths there.
+# workflow into ~/.codex when either surface is found, while portable discovery
+# also covers CODEX_BIN, PATH, and supported macOS app bundles. The Windows app
+# receives a bridge whose commands explicitly re-enter this distro. Never copy
+# config.toml across: the app owns Windows-specific plugin and runtime paths there.
 WINDOWS_CODEX_DIR="$(detect_windows_codex_dir || true)"
-if command -v codex >/dev/null 2>&1 || [ -n "$WINDOWS_CODEX_DIR" ]; then
-  bash "$REPO_DIR/tools/codex/install-codex.sh"
-  if bash "$REPO_DIR/tools/codex/doctor-workflow.sh"; then
+codex_bin="$(codex_resolve_bin || true)"
+if [ -n "$codex_bin" ] || [ -n "$WINDOWS_CODEX_DIR" ]; then
+  if [ -n "$codex_bin" ]; then
+    CODEX_BIN="$codex_bin" bash "$REPO_DIR/tools/codex/install-codex.sh"
+    doctor_command=(env CODEX_BIN="$codex_bin" bash "$REPO_DIR/tools/codex/doctor-workflow.sh")
+  else
+    bash "$REPO_DIR/tools/codex/install-codex.sh"
+    doctor_command=(bash "$REPO_DIR/tools/codex/doctor-workflow.sh")
+  fi
+  if "${doctor_command[@]}"; then
     ok "Codex workflow verified"
   else
     warn "Codex workflow installed; doctor reported local follow-up"
   fi
-  ok "Codex detected — hooks/instructions migrated into ~/.codex"
+
+  if [ -n "$codex_bin" ]; then
+    ok "Codex detected at $codex_bin — hooks/instructions migrated into ~/.codex"
+    CODEX_BIN="$codex_bin" bash "$REPO_DIR/tools/model-team/install-model-team.sh"
+    if CODEX_BIN="$codex_bin" bash "$REPO_DIR/tools/model-team/doctor-model-team.sh"; then
+      ok "Claude–Codex model-team verified"
+    else
+      warn "Model-team installed; doctor reported local follow-up"
+    fi
+  else
+    ok "Windows Codex App detected — shared workflow migrated into ~/.codex"
+  fi
+
   if [ -n "$WINDOWS_CODEX_DIR" ] && [ -n "$WSL_DISTRO" ]; then
     install_windows_codex_bridge "$WINDOWS_CODEX_DIR" || warn "Windows Codex App bridge needs local follow-up"
   elif [ "$IS_WSL" = 1 ] && [ -z "$WSL_DISTRO" ]; then
@@ -474,6 +499,8 @@ if command -v codex >/dev/null 2>&1 || [ -n "$WINDOWS_CODEX_DIR" ]; then
   elif [ "$IS_WSL" = 1 ]; then
     warn "WSL detected but the Windows Codex home was ambiguous; set CODEX_WINDOWS_DIR and re-run init.sh"
   fi
+elif [ "$INSTALL_CODEX" = 1 ]; then
+  die "--codex requested, but no Codex CLI/App was found through portable discovery"
 else
   info "Codex CLI/App not installed — skipping (nothing to migrate)"
 fi
@@ -566,91 +593,6 @@ if { [ "$OS" = "Darwin" ] && command -v launchctl >/dev/null 2>&1; } || command 
   [ "$OS" = "Darwin" ] || info "tip: 'loginctl enable-linger $USER' keeps the proxy alive without an active login"
 else
   warn "skipped (no service manager). Run manually: headroom proxy --port 8787 --host 127.0.0.1"
-fi
-
-# ---------------------------------------------------------------------------
-step "ChatGPT toggle (Claude CLI <-> ChatGPT)"
-# A small front-router on :8788 that Claude Code points at; it forwards to headroom
-# (:8787 -> Claude) or the claude-code-proxy bridge (:18765 -> your ChatGPT
-# subscription). `gpt-toggle` flips it live. Linux/systemd only (no launchd plists
-# shipped) — on macOS Claude Code stays on headroom :8787.
-CT_SRC="$REPO_DIR/tools/chatgpt-toggle"
-CT_LIB="$HOME/.local/share/chatgpt-toggle"
-CCP_URL="https://raw.githubusercontent.com/raine/claude-code-proxy/main/scripts/install.sh"
-if [ "$OS" != "Linux" ] || ! command -v systemctl >/dev/null 2>&1; then
-  info "ChatGPT toggle is Linux/systemd-only — skipping (Claude Code stays on headroom :8787)"
-else
-  # 1) Bridge binary — a PINNED, community proxy that speaks your ChatGPT subscription
-  #    via Codex OAuth. NOTE: unlike the uv/PyPI deps above this is a curl|bash of a
-  #    third-party binary that talks to an undocumented ChatGPT endpoint. See README
-  #    "ChatGPT toggle" + Safety.
-  if command -v claude-code-proxy >/dev/null 2>&1; then
-    ok "claude-code-proxy present ($(claude-code-proxy --version 2>/dev/null))"
-  elif CLAUDE_CODE_PROXY_INSTALL_DIR="$BIN_DIR" \
-       CLAUDE_CODE_PROXY_VERSION="${CLAUDE_CODE_PROXY_VERSION:-v0.1.11}" \
-       bash -c "curl -fsSL '$CCP_URL' | bash" >/dev/null 2>&1 \
-       && command -v claude-code-proxy >/dev/null 2>&1; then
-    ok "claude-code-proxy installed -> $BIN_DIR"
-  else
-    warn "claude-code-proxy install failed — ChatGPT toggle skipped (Claude Code stays on :8787)"
-  fi
-
-  if command -v claude-code-proxy >/dev/null 2>&1; then
-    # 2) router.py + toggle.py -> a fixed lib dir (independent of this clone's path)
-    mkdir -p "$CT_LIB"
-    for f in router.py toggle.py; do
-      backup "$CT_LIB/$f"; install -m 0644 "$CT_SRC/$f" "$CT_LIB/$f"
-    done
-    ok "router.py + toggle.py -> $CT_LIB"
-    # 3) gpt-toggle CLI (copy, like the other bin scripts — survives clone deletion)
-    backup "$BIN_DIR/gpt-toggle"; install -m 0755 "$CT_SRC/gpt-toggle" "$BIN_DIR/gpt-toggle"
-    ok "gpt-toggle -> $BIN_DIR/gpt-toggle"
-    # 4) systemd units -> enable, then RESTART (enable --now won't restart an already
-    #    running unit, so a changed unit file would otherwise keep the stale process)
-    mkdir -p "$UNIT_DIR"
-    for u in chatgpt-bridge.service chatgpt-router.service chatgpt-model-refresh.service chatgpt-model-refresh.timer; do
-      backup "$UNIT_DIR/$u"; cp "$CT_SRC/systemd/$u" "$UNIT_DIR/$u"
-    done
-    systemctl --user daemon-reload
-    systemctl --user enable --now chatgpt-bridge.service chatgpt-router.service chatgpt-model-refresh.timer >/dev/null 2>&1 || true
-    systemctl --user restart chatgpt-bridge.service chatgpt-router.service >/dev/null 2>&1 || true
-    ok "services enabled: bridge :18765, router :8788, daily model refresh"
-    # 5) Resolve the newest working ChatGPT model for the default (needs bridge auth).
-    if gpt-toggle refresh >/dev/null 2>&1; then
-      ok "default ChatGPT model: $(cat "$HOME/.config/chatgpt-toggle/model-default" 2>/dev/null)"
-    else
-      info "run 'gpt-toggle refresh' after bridge login to pick the newest ChatGPT model"
-    fi
-    # 6) Point Claude Code at the router — ONLY once it actually answers. A fresh
-    #    'uv run router.py' first downloads starlette/httpx/uvicorn, so poll with retry.
-    #    If it never comes up, LEAVE :8787 (headroom-direct) — a safe degrade, not a brick.
-    router_up=0
-    for _ in $(seq 1 40); do
-      curl -fsS --max-time 2 http://127.0.0.1:8788/healthz >/dev/null 2>&1 && { router_up=1; break; }
-      sleep 1
-    done
-    SET="$CLAUDE_DIR/settings.json"
-    if [ "$router_up" = 1 ] && command -v jq >/dev/null 2>&1; then
-      tmp="$(mktemp)"
-      if jq '.env.ANTHROPIC_BASE_URL="http://127.0.0.1:8788"
-             | .env.ANTHROPIC_DEFAULT_HAIKU_MODEL="claude-sonnet-5"' "$SET" > "$tmp" 2>/dev/null \
-         && [ -s "$tmp" ]; then
-        backup "$SET"; mv "$tmp" "$SET"
-        ok "Claude Code -> router :8788 (main model toggleable; housekeeping on Sonnet 5)"
-      else
-        rm -f "$tmp"; warn "could not edit settings.json env — Claude Code left on :8787"
-      fi
-    else
-      warn "router not answering on :8788 — Claude Code left on headroom :8787 (check: systemctl --user status chatgpt-router)"
-    fi
-    # 7) The GPT path needs a one-time browser login (cannot be automated here).
-    if claude-code-proxy codex auth status >/dev/null 2>&1; then
-      ok "claude-code-proxy already authed to your ChatGPT subscription"
-    else
-      info "GPT path (one-time): claude-code-proxy codex auth device   # browser login, ChatGPT account"
-      info "  then flip on with: gpt-toggle on   (off again: gpt-toggle off)"
-    fi
-  fi
 fi
 
 # ---------------------------------------------------------------------------
@@ -799,30 +741,18 @@ ${c_grn}Done.${c_rst}
 
   ${c_grn}Request flow${c_rst}
   ----------------------------------------------------------------------
-                              .- off -> headroom :8787 -> Claude
-     claude  ->  router :8788 -|
-      (ANTHROPIC_BASE_URL)     '- on  -> bridge  :18765 -> ChatGPT (your sub)
-
-     graphify / codex ----------------> headroom :8787 -> Claude
-       (always Claude -- never see the toggle)
+     claude / graphify ---------------> headroom :8787 -> Claude
+     codex ---------------------------> headroom :8787 -> native backend
 
      memory: mempalace (local, zero-API)   code graph: graphify
-
-  ${c_grn}ChatGPT toggle${c_rst}   ${c_dim}(Linux/systemd)${c_rst}
-  ----------------------------------------------------------------------
-     ${c_dim}gpt-toggle on | off | status${c_rst}         flip the main model, live
-     ${c_dim}gpt-toggle model [<name> | auto]${c_rst}     pick a model / dynamic default
-     ${c_dim}gpt-toggle effort [<low..max>]${c_rst}       reasoning effort, all GPT requests
-     ${c_dim}gpt-toggle refresh${c_rst}                   re-resolve newest available
 
   ${c_grn}Next${c_rst}
   ----------------------------------------------------------------------
      1) ${c_dim}claude${c_rst}                  start Claude Code (auto-installs plugins); log in
      2) ${c_dim}headroom-watch${c_rst}          optional -- watch token compression live
-     3) seed memory (one-time):
+     3) ${c_dim}model-team-watch${c_rst}         optional -- watch Codex worker activity
+     4) seed memory (one-time):
         ${c_dim}mempalace init "\$HOME" && mempalace mine ~/.claude/projects/ --mode convos${c_rst}
-     4) ChatGPT path (one-time browser login):
-        ${c_dim}claude-code-proxy codex auth device${c_rst}  then  ${c_dim}gpt-toggle on${c_rst}
 
   ${c_dim}No secrets were copied by this repo -- you log in interactively.${c_rst}
 EOF

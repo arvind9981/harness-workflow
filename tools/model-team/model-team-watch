@@ -1,0 +1,161 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+URL="${HEADROOM_URL:-http://127.0.0.1:8787}"
+INTERVAL=2
+ONCE=0
+JSON_OUTPUT=0
+REPO="$PWD"
+
+usage() {
+  printf 'Usage: %s [--once] [--json] [--repo PATH] [-n SECONDS]\n' "$0"
+}
+
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --once) ONCE=1; shift ;;
+    --json) JSON_OUTPUT=1; ONCE=1; shift ;;
+    --repo) REPO="${2:?--repo needs a path}"; shift 2 ;;
+    -n|--interval) INTERVAL="${2:?-n needs a value}"; shift 2 ;;
+    -h|--help) usage; exit 0 ;;
+    *) printf 'unknown arg: %s\n' "$1" >&2; usage >&2; exit 2 ;;
+  esac
+done
+
+read_stats() {
+  if [ -n "${MODEL_TEAM_STATS_FILE:-}" ]; then
+    cat "$MODEL_TEAM_STATS_FILE"
+  else
+    curl -fsS --max-time 4 "$URL/stats" 2>/dev/null
+  fi
+}
+
+read_health() {
+  if [ -n "${MODEL_TEAM_HEALTH_FILE:-}" ]; then
+    cat "$MODEL_TEAM_HEALTH_FILE"
+  else
+    curl -fsS --max-time 4 "$URL/health" 2>/dev/null
+  fi
+}
+
+read_processes() {
+  if [ -n "${MODEL_TEAM_PS_FILE:-}" ]; then
+    cat "$MODEL_TEAM_PS_FILE"
+  else
+    ps -axo pid=,etime=,command=
+  fi
+}
+
+snapshot() {
+  local stats health processes worker_line worker_up=false worker_pid=0 worker_uptime=""
+  local activity headroom_healthy=false branch="" changed_files=0 repo_valid=false status_lines=""
+
+  stats="$(read_stats || true)"
+  health="$(read_health || true)"
+  processes="$(read_processes || true)"
+  worker_line="$(printf '%s\n' "$processes" | awk '
+    index($0, "codex mcp-server") && index($0, "mcp_servers.MCP_DOCKER.enabled=false") {print; exit}
+  ')"
+  if [ -n "$worker_line" ]; then
+    worker_up=true
+    worker_pid="$(printf '%s\n' "$worker_line" | awk '{print $1}')"
+    worker_uptime="$(printf '%s\n' "$worker_line" | awk '{print $2}')"
+  fi
+
+  activity='{"model":"","client":"","timestamp":"","latency_ms":0,"requests_5m":0}'
+  if [ -n "$stats" ]; then
+    activity="$(printf '%s' "$stats" | jq -c '
+      def epoch: try (sub("\\.[0-9]+$"; "Z") | fromdateiso8601) catch 0;
+      [.request_logs[]? | select((.tags.client // "") == "codex")] as $requests
+      | ($requests | sort_by(.timestamp) | last // {}) as $latest
+      | ($latest.timestamp // "" | epoch) as $latest_epoch
+      | {
+          model: ($latest.model // ""),
+          client: ($latest.tags.client // ""),
+          timestamp: ($latest.timestamp // ""),
+          latency_ms: ($latest.total_latency_ms // 0),
+          requests_5m: (if $latest_epoch == 0 then 0 else
+            ([$requests[] | select((.timestamp | epoch) >= ($latest_epoch - 300))]
+             | unique_by(.request_id) | length)
+          end)
+        }
+    ' 2>/dev/null || printf '%s' "$activity")"
+  fi
+
+  if [ -n "$health" ] && printf '%s' "$health" \
+    | jq -e '(.status == "healthy") and (.ready == true)' >/dev/null 2>&1; then
+    headroom_healthy=true
+  fi
+
+  if git -C "$REPO" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+    repo_valid=true
+    branch="$(git -C "$REPO" symbolic-ref --short HEAD 2>/dev/null \
+      || git -C "$REPO" rev-parse --short HEAD 2>/dev/null || true)"
+    status_lines="$(git -C "$REPO" status --short 2>/dev/null || true)"
+    if [ -n "$status_lines" ]; then
+      changed_files="$(printf '%s\n' "$status_lines" | wc -l | tr -d ' ')"
+    fi
+  fi
+
+  jq -n \
+    --argjson worker_up "$worker_up" --argjson worker_pid "$worker_pid" \
+    --arg worker_uptime "$worker_uptime" --argjson activity "$activity" \
+    --argjson headroom_healthy "$headroom_healthy" --arg headroom_url "$URL" \
+    --argjson repo_valid "$repo_valid" --arg repo_path "$REPO" --arg branch "$branch" \
+    --argjson changed_files "$changed_files" --arg status "$status_lines" '
+      {
+        worker: {up: $worker_up, pid: $worker_pid, uptime: $worker_uptime},
+        activity: $activity,
+        headroom: {healthy: $headroom_healthy, url: $headroom_url},
+        repository: {
+          valid: $repo_valid,
+          path: $repo_path,
+          branch: $branch,
+          changed_files: $changed_files,
+          status: (if ($status | length) == 0 then [] else ($status | split("\n")) end)
+        }
+      }'
+}
+
+render_text() {
+  local data="$1"
+  printf '\033[1m  model-team watcher\033[0m\n'
+  printf '  ────────────────────────────────────────────────\n'
+  printf '%s' "$data" | jq -r '
+    "  codex-worker  " + (if .worker.up then "UP · pid \(.worker.pid) · up \(.worker.uptime)" else "DOWN" end),
+    (if (.activity.model | length) > 0 then
+       "  latest request  \(.activity.model) · client \(.activity.client) · \(.activity.timestamp | capture("T(?<time>[0-9:]+)").time) · \((.activity.latency_ms / 1000 * 10 | round) / 10)s · \(.activity.requests_5m) requests/5m"
+     else "  latest request  —" end),
+    "  headroom      " + (if .headroom.healthy then "healthy" else "unavailable" end),
+    (if .repository.valid then
+       "  repository    \(.repository.branch // "detached") · changed files  \(.repository.changed_files)"
+     else "  repository    not a Git worktree" end),
+    (.repository.status[:8][]? | "    \(.)")
+  '
+  printf '\n  \033[2mServer UP means available; request activity is the latest completed Headroom observation.\033[0m\n'
+}
+
+run_once() {
+  local data
+  data="$(snapshot)"
+  if [ "$JSON_OUTPUT" = 1 ]; then
+    printf '%s\n' "$data" | jq .
+  else
+    render_text "$data"
+  fi
+}
+
+if [ "$ONCE" = 1 ]; then
+  run_once
+  exit 0
+fi
+
+trap 'printf "\033[?25h\n"; exit 0' INT TERM
+printf '\033[?25l'
+while true; do
+  printf '\033[2J\033[H'
+  printf '  \033[2m%s  (every %ss, Ctrl-C to quit)\033[0m\n' "$(date '+%H:%M:%S')" "$INTERVAL"
+  run_once
+  sleep "$INTERVAL"
+done
