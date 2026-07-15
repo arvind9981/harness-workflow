@@ -45,6 +45,55 @@ assert_repo_not_contains() {
   fi
 }
 
+detect_platform() {
+  env -i PATH="$PATH" HOME="${HOME:-/tmp}" "$@" bash -c '
+    source "$1"
+    codex_detect_platform || exit $?
+    printf "%s|%s|%s\n" "$PLATFORM_OS" "$IS_WSL" "$WSL_DISTRO"
+  ' _ "$REPO_DIR/tools/codex/platform.sh"
+}
+
+test_platform() {
+  local kernel output rc
+
+  assert_eq 'Linux|0|' \
+    "$(detect_platform INIT_UNAME_S=Linux INIT_PROC_VERSION=Linux INIT_WSL_INTEROP=0)" \
+    'platform detects native Linux'
+  assert_eq 'Darwin|0|' \
+    "$(detect_platform INIT_UNAME_S=Darwin INIT_PROC_VERSION=Darwin INIT_WSL_INTEROP=0)" \
+    'platform detects macOS'
+  assert_eq 'Linux|1|Ubuntu' \
+    "$(detect_platform INIT_UNAME_S=Linux INIT_PROC_VERSION=Linux INIT_WSL_INTEROP=0 WSL_DISTRO_NAME=Ubuntu)" \
+    'platform detects WSL from its distro name'
+  assert_eq 'Linux|1|' \
+    "$(detect_platform INIT_UNAME_S=Linux INIT_PROC_VERSION='Linux Microsoft WSL2' INIT_WSL_INTEROP=0)" \
+    'platform detects WSL from the kernel version'
+  assert_eq 'Linux|1|archlinux' \
+    "$(detect_platform INIT_UNAME_S=Linux INIT_PROC_VERSION='Linux Microsoft WSL2' INIT_WSL_INTEROP=0 CODEX_WSL_DISTRO=archlinux)" \
+    'platform honors an explicit WSL distro'
+
+  for kernel in MINGW64_NT-10.0 MSYS_NT-10.0 CYGWIN_NT-10.0 FreeBSD; do
+    if detect_platform INIT_UNAME_S="$kernel" INIT_PROC_VERSION="$kernel" \
+        INIT_WSL_INTEROP=0 >/dev/null 2>&1; then
+      fail "platform rejects $kernel"
+    else
+      pass "platform rejects $kernel"
+    fi
+  done
+
+  output="$(INIT_UNAME_S=MINGW64_NT-10.0 INIT_PROC_VERSION=MINGW \
+    INIT_WSL_INTEROP=0 "$REPO_DIR/init.sh" 2>&1)"
+  rc=$?
+  if [ "$rc" -ne 0 ]; then
+    pass 'init rejects native Windows shells'
+  else
+    fail 'init rejects native Windows shells'
+  fi
+  assert_text_contains "$output" \
+    'native Windows shells are unsupported; run init.sh inside WSL' \
+    'init explains that Windows users must use WSL'
+}
+
 hash_file() {
   if command -v shasum >/dev/null 2>&1; then
     shasum -a 256 "$1" | awk '{print $1}'
@@ -491,17 +540,19 @@ EOF
 }
 
 usage() {
-  printf 'Usage: %s {instructions|discovery|installer|hooks|doctor|all}\n' "$0" >&2
+  printf 'Usage: %s {platform|instructions|discovery|installer|hooks|doctor|all}\n' "$0" >&2
 }
 
 group="${1:-all}"
 case "$group" in
+  platform) test_platform ;;
   instructions) test_instructions ;;
   discovery) test_discovery ;;
   installer) test_installer ;;
   hooks) test_hooks ;;
   doctor) test_doctor ;;
   all)
+    test_platform
     test_instructions
     test_discovery
     test_installer
