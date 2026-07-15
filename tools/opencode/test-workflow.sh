@@ -70,6 +70,11 @@ run_layout() {
   grep -Fq 'claude-worker_claude' "$REPO_DIR/opencode/agents/build.md" \
     && pass 'build agent enables the bounded Claude worker' \
     || fail 'build agent does not enable the bounded Claude worker'
+  grep -Fq 'CLAUDE_WORKER_HEAVY_TIMEOUT' "$REPO_DIR/tools/opencode/claude-worker-mcp" \
+    && grep -Fq '"1800"' "$REPO_DIR/tools/opencode/claude-worker-mcp" \
+    && grep -Fq 'CLAUDE_WORKER_ARCHITECT_RETRY_BUDGET_USD' "$REPO_DIR/README.md" \
+    && pass 'high-risk Claude fallback is configurable and documented' \
+    || fail 'high-risk Claude fallback defaults are missing'
   ! grep -Fq 'MCP_DOCKER_*: true' "$REPO_DIR/opencode/agents/build.md" \
     && grep -Fq 'service: allow' "$REPO_DIR/opencode/agents/build.md" \
     && grep -Fq 'MCP_DOCKER_*: true' "$REPO_DIR/opencode/agents/service.md" \
@@ -340,6 +345,29 @@ if any("BLOCK_UNTIL_CANCELLED" in argument for argument in arguments):
     while True:
         time.sleep(0.1)
 
+if any("FAIL_BUDGET_ONCE" in argument for argument in arguments):
+    state = os.environ["FAKE_CLAUDE_STATE"]
+    if not os.path.exists(state):
+        with open(state, "w", encoding="utf-8") as handle:
+            handle.write("failed\n")
+        print("Maximum budget reached", file=sys.stderr)
+        raise SystemExit(1)
+
+if any("TIMEOUT_ONCE" in argument for argument in arguments):
+    state = os.environ["FAKE_CLAUDE_STATE"]
+    if not os.path.exists(state):
+        with open(state, "w", encoding="utf-8") as handle:
+            handle.write("timed-out\n")
+        time.sleep(60)
+
+if any("FAIL_GENERIC" in argument for argument in arguments):
+    print("Authentication failed", file=sys.stderr)
+    raise SystemExit(1)
+
+if any("FAIL_BUDGET_CONFIG" in argument for argument in arguments):
+    print("Budget limit must be positive", file=sys.stderr)
+    raise SystemExit(1)
+
 resumed = "--resume" in arguments
 print(json.dumps({
     "result": "REPLY_OK" if resumed else "START_OK",
@@ -415,6 +443,109 @@ PY
     pass 'worker explains process-scoped session ownership'
   else
     fail 'worker returns an ambiguous expired-session error'
+  fi
+
+  if python3 - "$REPO_DIR/tools/opencode/claude-worker-mcp" "$fake" "$temp" <<'PY'
+import json
+import os
+from pathlib import Path
+import subprocess
+import sys
+
+worker, fake, temp = sys.argv[1:]
+
+def call(role, prompt, log_name, state_name, extra_env):
+    log = Path(temp, log_name)
+    state = Path(temp, state_name)
+    env = os.environ.copy()
+    env.update(extra_env)
+    env["FAKE_CLAUDE_LOG"] = str(log)
+    env["FAKE_CLAUDE_STATE"] = str(state)
+    process = subprocess.Popen(
+        [sys.executable, worker, "--claude-bin", fake],
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        env=env,
+    )
+    assert process.stdin is not None
+    assert process.stdout is not None
+    process.stdin.write(json.dumps({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "tools/call",
+        "params": {
+            "name": "claude",
+            "arguments": {"role": role, "prompt": prompt},
+        },
+    }) + "\n")
+    process.stdin.flush()
+    response = json.loads(process.stdout.readline())
+    process.stdin.close()
+    process.wait(timeout=5)
+    assert log.exists(), (response, process.stderr.read())
+    return response, log.read_text(encoding="utf-8")
+
+budget_response, budget_log = call(
+    "architect", "FAIL_BUDGET_ONCE", "budget.log", "budget.state", {}
+)
+assert budget_response.get("result"), budget_response
+assert budget_log.count("-p --safe-mode") == 2, budget_log
+assert budget_log.index("--max-budget-usd 8.00") < budget_log.index("--max-budget-usd 12.00")
+assert budget_log.count("--permission-mode plan") == 2, budget_log
+assert budget_log.count("--strict-mcp-config") == 2, budget_log
+assert budget_log.count('--mcp-config {"mcpServers":{}}') == 2, budget_log
+
+override_response, override_log = call(
+    "architect",
+    "FAIL_BUDGET_ONCE",
+    "override.log",
+    "override.state",
+    {
+        "CLAUDE_WORKER_ARCHITECT_BUDGET_USD": "20.00",
+        "CLAUDE_WORKER_ARCHITECT_RETRY_BUDGET_USD": "10.00",
+    },
+)
+assert override_response.get("result"), override_response
+assert override_log.count("--max-budget-usd 20.00") == 2, override_log
+
+timeout_response, timeout_log = call(
+    "architect",
+    "TIMEOUT_ONCE",
+    "heavy-timeout.log",
+    "heavy-timeout.state",
+    {"CLAUDE_WORKER_HEAVY_TIMEOUT": "3"},
+)
+assert timeout_response.get("result"), timeout_response
+assert timeout_log.count("-p --safe-mode") == 2, timeout_log
+
+standard_response, standard_log = call(
+    "advisor",
+    "TIMEOUT_ONCE",
+    "standard-timeout.log",
+    "standard-timeout.state",
+    {"CLAUDE_WORKER_TIMEOUT": "3"},
+)
+assert standard_response.get("error"), standard_response
+assert standard_log.count("-p --safe-mode") == 1, standard_log
+
+generic_response, generic_log = call(
+    "architect", "FAIL_GENERIC", "generic.log", "generic.state", {}
+)
+assert "Authentication failed" in generic_response.get("error", {}).get("message", "")
+assert generic_log.count("-p --safe-mode") == 1, generic_log
+
+config_response, config_log = call(
+    "architect", "FAIL_BUDGET_CONFIG", "budget-config.log", "budget-config.state", {}
+)
+assert "Budget limit must be positive" in config_response.get("error", {}).get("message", "")
+assert config_log.count("-p --safe-mode") == 1, config_log
+PY
+  then
+    pass 'high-risk Claude calls retry only confirmed budget and timeout failures'
+  else
+    fail 'Claude worker heavy fallback policy is incorrect'
   fi
 
   if FAKE_CLAUDE_LOG="$log" FAKE_CLAUDE_PID_FILE="$temp/claude.pid" \
