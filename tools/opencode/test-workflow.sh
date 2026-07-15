@@ -123,6 +123,20 @@ run_layout() {
       "$REPO_DIR/README.md" \
     && pass 'README keeps Terra scout and support roles distinct' \
     || fail 'README conflates Terra scout and support responsibilities'
+  grep -Fq '### OpenCode workflow' "$REPO_DIR/README.md" \
+    && grep -Fq 'Sol scores complexity' "$REPO_DIR/README.md" \
+    && grep -Fq 'Sonnet advises' "$REPO_DIR/README.md" \
+    && grep -Fq 'Fable creates architecture plan' "$REPO_DIR/README.md" \
+    && grep -Fq 'Terra performs read-only reconnaissance' "$REPO_DIR/README.md" \
+    && pass 'README OpenCode workflow names every model role' \
+    || fail 'README OpenCode workflow omits model roles'
+  grep -Fq '0-2: inline' "$REPO_DIR/README.md" \
+    && grep -Fq '3-6: standard' "$REPO_DIR/README.md" \
+    && grep -Fq '7-12: high risk' "$REPO_DIR/README.md" \
+    && grep -Fq 'reviews diff and evidence' "$REPO_DIR/README.md" \
+    && grep -Fq 'bounded repair and re-test' "$REPO_DIR/README.md" \
+    && pass 'README OpenCode workflow shows routing, review, and repair' \
+    || fail 'README OpenCode workflow is not an execution sequence'
   grep -Fq 'routes OpenAI traffic through Headroom' "$REPO_DIR/README.md" \
     && pass 'README documents direct OpenCode Headroom routing' \
     || fail 'README does not document direct OpenCode Headroom routing'

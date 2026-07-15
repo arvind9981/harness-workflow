@@ -34,39 +34,72 @@ configuration are loaded.
 
 ## How the workflow runs
 
+### Claude Code workflow
+
+Claude controls the run, Fable supplies read-only architecture and review, and
+Codex becomes the only writer when the model team activates. Read the diagram
+top to bottom: the left branch is the inline fast path; the right branch is the
+full plan, implementation, verification, and review loop.
+
 ```mermaid
-flowchart LR
-    U["User task"] --> R{"Harness and route"}
+flowchart TD
+    U["User task"] --> C["Claude recalls relevant context<br/>and scores complexity"]
+    C --> R{"Route?"}
 
-    R -->|"Claude Code"| C["Claude control plane<br/>memory, live services, verification"]
-    C -->|"plan"| F["Fable architect<br/>read-only"]
-    F -->|"task contract"| C
-    C -->|"codex"| W["Codex worker<br/>only repository writer"]
-    W -->|"diff and tests"| C
-    C -->|"evidence"| F
-    F -->|"accept or repair"| C
+    R -->|"0-2 or single agent"| I["Claude implements<br/>and verifies inline"]
+    I --> DI["Report verified result"]
 
-    R -->|"OpenCode"| S["Sol controller<br/>only repository writer"]
-    S -->|"standard"| N["Sonnet advisor<br/>read-only"]
-    S -->|"high risk"| OF["Fable architect<br/>read-only"]
-    S -.->|"bounded reconnaissance"| T["Terra scout"]
-    S -.->|"only when needed"| O["Memory or live-service agent"]
-
-    C --> H["Headroom :8787"]
-    S --> H
+    R -->|"3-12 or /model-team"| P["Fable creates read-only plan"]
+    P --> W["Codex implements<br/>only writer"]
+    W --> V["Claude independently verifies<br/>diff and test evidence"]
+    V -->|"Evidence passes"| F["Fable reviews actual evidence"]
+    F --> A{"Review verdict"}
+    A -->|"Accept"| DT["Report verified result"]
+    V -->|"Evidence fails"| X["Codex repairs on same thread<br/>codex-reply"]
+    A -->|"Repair or replan"| X
+    X --> V
+    A -->|"Block"| B["Report blocker<br/>and remaining risk"]
 ```
 
-The Claude path uses Claude as the control plane, a resumable Fable architect
-for planning and review, and a Codex MCP worker for implementation. Repairs use
-`codex-reply` on the original process-local worker thread.
+### OpenCode workflow
 
-The OpenCode path keeps Sol as the only writer. It automatically routes medium
-work through Sonnet 5 and high-risk work through Fable 5. Terra handles bounded
-read-only reconnaissance. Memory and live-service MCP schemas are exposed only
-through on-demand subagents, keeping ordinary build turns smaller.
+Sol remains the only writer. It automatically routes medium work through
+Sonnet 5 and high-risk work through Fable 5; score 0-2 work stays inline. The
+team routes merge at Sol for implementation, then use the reviewer selected by
+the original complexity score.
 
-All configured Claude, Codex, and OpenCode model traffic goes through the local
-Headroom proxy. Mempalace recall and Graphify queries operate on local data.
+```mermaid
+flowchart TD
+    U["User task"] --> S["Sol scores complexity"]
+    S --> R{"Route?"}
+
+    R -->|"0-2: inline"| I["Sol implements and tests inline"]
+    I --> DI["Report verified result"]
+
+    R -->|"3-6: standard"| N["Sonnet advises"]
+    N --> W["Sol implements and tests<br/>only writer"]
+
+    R -->|"7-12: high risk"| T{"Reconnaissance useful?"}
+    T -->|"Yes"| TS["Terra performs read-only reconnaissance"]
+    T -->|"No"| F["Fable creates architecture plan"]
+    TS --> F
+    F --> W
+
+    W --> G{"Review route?"}
+    G -->|"3-6"| NR["Sonnet reviews diff and evidence"]
+    G -->|"7-12"| FR["Fable reviews diff and evidence"]
+    NR --> V{"Review verdict"}
+    FR --> V
+    V -->|"Accept"| DT["Report verified result"]
+    V -->|"Repair or replan"| X["Sol performs bounded repair and re-test"]
+    X --> G
+    V -->|"Block"| B["Report blocker"]
+```
+
+These diagrams show execution order. Headroom transports configured model
+traffic, Mempalace and Graphify supply context when needed, and live-service
+MCPs are opened on demand. They support workflow steps but do not control the
+sequence, so they are intentionally kept out of the diagrams.
 
 ## Automatic routing
 
