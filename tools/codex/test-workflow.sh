@@ -318,6 +318,14 @@ EOF
   assert_file_contains "$workflow" 'ubuntu-latest' 'CI validates Ubuntu'
   assert_file_contains "$workflow" 'macos-latest' 'CI validates macOS'
   assert_file_contains "$workflow" '/bin/bash' 'macOS CI explicitly exercises stock Bash'
+  assert_file_contains "$REPO_DIR/README.md" '`init.sh` supports macOS, Linux, and WSL' \
+    'README explicitly documents WSL support'
+  assert_file_contains "$REPO_DIR/README.md" 'On WSL, it uses `systemd --user` when available' \
+    'README documents the WSL systemd path'
+  assert_file_contains "$REPO_DIR/README.md" 'prints manual service commands' \
+    'README documents the WSL service fallback'
+  assert_file_contains "$REPO_DIR/README.md" 'Windows Codex App bridge' \
+    'README documents the optional Windows Codex bridge'
 
   : > "$tmp/empty-stats.json"
   output="$(HEADROOM_STATS_FILE="$tmp/empty-stats.json" HEADROOM_HEALTH_FILE="$tmp/empty-stats.json" \

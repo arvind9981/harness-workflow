@@ -14,9 +14,12 @@ cd harness-workflow
 claude
 ```
 
-`init.sh` supports macOS and Linux, detects Codex and OpenCode when installed,
-and safely skips optional harnesses that are absent. Use `./init.sh --codex` when
-Codex is required and setup should fail if it cannot be found.
+`init.sh` supports macOS, Linux, and WSL. On WSL, it uses `systemd --user` when available;
+otherwise it skips background services and prints manual service commands. It
+can also configure an optional Windows Codex App bridge for hooks and
+Mempalace. The installer detects Codex and OpenCode when installed and safely
+skips optional harnesses that are absent. Use `./init.sh --codex` when Codex is
+required and setup should fail if it cannot be found.
 
 After installation:
 
@@ -57,8 +60,8 @@ The Claude path uses Claude as the control plane, a resumable Fable architect
 for planning and review, and a Codex MCP worker for implementation. Repairs use
 `codex-reply` on the original process-local worker thread.
 
-The OpenCode path keeps Sol as the only writer. It automatically routes medium work through Sonnet 5
-and high-risk work through Fable 5. Terra handles bounded
+The OpenCode path keeps Sol as the only writer. It automatically routes medium
+work through Sonnet 5 and high-risk work through Fable 5. Terra handles bounded
 read-only reconnaissance. Memory and live-service MCP schemas are exposed only
 through on-demand subagents, keeping ordinary build turns smaller.
 
@@ -117,11 +120,12 @@ Use a single agent. Update this typo and run the focused check.
 | Role | Model | Responsibility |
 |---|---|---|
 | Claude control plane | Current Claude session | Recall, live services, orchestration, independent verification, and outward actions |
+| Sonnet advisor | `sonnet` | Read-only medium-complexity planning and routine review |
 | Fable architect | `fable` | Read-only planning, decomposition, replanning, and evidence-based review |
 | Codex worker | Configured Codex default | `danger-full-access`, approval policy `never`, implementation and verification |
 | OpenCode controller | `openai/gpt-5.6-sol` | Only writer in OpenCode; owns the actual diff and tests |
 | OpenCode scouts | `openai/gpt-5.6-terra` | Bounded repository or official-documentation reconnaissance |
-| OpenCode support agents | `openai/gpt-5.6-terra` | Bounded reconnaissance, memory recall, and on-demand MCP access without loading those schemas into normal turns |
+| OpenCode support agents | `openai/gpt-5.6-terra` | Bounded memory recall and on-demand MCP access without loading those schemas into normal turns |
 
 The Codex worker uses an isolated per-process `CODEX_HOME` with zero inner MCP servers
 or plugins. It links the existing login and retains only model routing,
@@ -343,7 +347,8 @@ The installer:
 - discovers Codex through `PATH`, `CODEX_BIN`, and supported app bundles;
 - installs OpenCode integration only when OpenCode already exists;
 - renders machine-specific paths while keeping portable defaults in the repo;
-- uses `launchd` on macOS and `systemd --user` on Linux;
+- uses `launchd` on macOS and `systemd --user` on Linux or WSL when available,
+  otherwise leaves service startup manual;
 - backs up only changed files and keeps the newest five `bak-init` snapshots;
 - is safe to rerun and performs no commit, push, or branch creation.
 

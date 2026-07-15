@@ -106,10 +106,23 @@ run_layout() {
   ' "$REPO_DIR/opencode/opencode.json" >/dev/null \
     && pass 'tracked OpenCode baseline contains portable workflow defaults' \
     || fail 'tracked OpenCode baseline is missing portable workflow defaults'
-  grep -Fq 'automatically routes medium work through Sonnet 5' "$REPO_DIR/README.md" \
-    && grep -Fq 'high-risk work through Fable 5' "$REPO_DIR/README.md" \
-    && pass 'README documents automatic OpenCode routing' \
-    || fail 'README does not document automatic OpenCode routing'
+  readme_text="$(tr '\n' ' ' < "$REPO_DIR/README.md")"
+  case "$readme_text" in
+    *'automatically routes medium work through Sonnet 5'*'high-risk work through Fable 5'*)
+      pass 'README documents automatic OpenCode routing'
+      ;;
+    *) fail 'README does not document automatic OpenCode routing' ;;
+  esac
+  grep -Fq '| Sonnet advisor | `sonnet` | Read-only medium-complexity planning and routine review |' \
+      "$REPO_DIR/README.md" \
+    && pass 'README role table includes the Sonnet advisor' \
+    || fail 'README role table omits the Sonnet advisor'
+  grep -Fq '| OpenCode scouts | `openai/gpt-5.6-terra` | Bounded repository or official-documentation reconnaissance |' \
+      "$REPO_DIR/README.md" \
+    && grep -Fq '| OpenCode support agents | `openai/gpt-5.6-terra` | Bounded memory recall and on-demand MCP access without loading those schemas into normal turns |' \
+      "$REPO_DIR/README.md" \
+    && pass 'README keeps Terra scout and support roles distinct' \
+    || fail 'README conflates Terra scout and support responsibilities'
   grep -Fq 'routes OpenAI traffic through Headroom' "$REPO_DIR/README.md" \
     && pass 'README documents direct OpenCode Headroom routing' \
     || fail 'README does not document direct OpenCode Headroom routing'
