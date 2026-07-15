@@ -96,14 +96,10 @@ if [ -n "${GRAPHIFY_EXTRA_REPOS:-}" ]; then
   # shellcheck disable=SC2206
   extra_repos=($GRAPHIFY_EXTRA_REPOS)
   IFS="$OLD_IFS"
-  GRAPHIFY_REPOS+=("${extra_repos[@]}")
+  if [ "${#extra_repos[@]}" -gt 0 ]; then
+    GRAPHIFY_REPOS+=("${extra_repos[@]}")
+  fi
 fi
-
-# OS-derived hint string shown to the user (the service manager differs per OS).
-case "$OS" in
-  Darwin) STATUS_HR="launchctl list | grep headroom-proxy" ;;
-  *)      STATUS_HR="systemctl --user status headroom-proxy" ;;
-esac
 
 c_grn=$'\033[32m'; c_yel=$'\033[33m'; c_red=$'\033[31m'; c_dim=$'\033[2m'; c_rst=$'\033[0m'
 ok()   { printf '  %s✓%s %s\n' "$c_grn" "$c_rst" "$1"; }
@@ -199,211 +195,33 @@ PY
   fi
 }
 
-svc_enable() {  # svc_enable <linux_unit_file> <mac_plist_file> — install + start a background service
-  local linux_unit="$1" mac_plist="$2"
-  if [ "$OS" = "Darwin" ]; then
-    mkdir -p "$LAUNCH_DIR" "$HOME/Library/Logs"
-    local dest; dest="$LAUNCH_DIR/$(basename "$mac_plist")"
-    local rendered; rendered="$(mktemp)"
-    sed "s#__HOME__#$HOME#g" "$mac_plist" > "$rendered" # launchd has no %h specifier
-    if replace_if_changed "$rendered" "$dest"; then
-      launchctl unload "$dest" 2>/dev/null || true
-      if launchctl load -w "$dest"; then
-        ok "$(basename "$dest") loaded (launchd)"
-      else
-        die "launchctl load failed for $(basename "$dest")"
-      fi
-    elif launchctl list "$(basename "$dest" .plist)" >/dev/null 2>&1 \
-        || launchctl load -w "$dest"; then
-      ok "$(basename "$dest") already current and loaded (launchd)"
-    else
-      die "launchctl load failed for $(basename "$dest")"
-    fi
-  else
-    mkdir -p "$UNIT_DIR"
-    local unit; unit="$(basename "$linux_unit")"
-    if install_if_changed "$linux_unit" "$UNIT_DIR/$unit" 0644; then
-      systemctl --user daemon-reload
-      if systemctl --user enable --now "$unit"; then
-        ok "$unit enabled and started (systemd)"
-      else
-        die "systemctl enable failed for $unit"
-      fi
-    elif systemctl --user is-active --quiet "$unit"; then
-      ok "$unit already current and active (systemd)"
-    else
-      if systemctl --user enable --now "$unit"; then
-        ok "$unit started (systemd)"
-      else
-        die "systemctl enable failed for $unit"
-      fi
-    fi
-  fi
-}
+. "$REPO_DIR/tools/codex/services.sh"
+. "$REPO_DIR/tools/codex/wsl.sh"
 
-detect_windows_codex_dir() {  # Print the Windows Codex home as a WSL path, if unambiguous.
-  [ "$IS_WSL" = 1 ] || return 1
-
-  if [ -n "${CODEX_WINDOWS_DIR:-}" ]; then
-    printf '%s\n' "$CODEX_WINDOWS_DIR"
-    return 0
-  fi
-
-  case "${CODEX_HOME:-}" in
-    [A-Za-z]:\\*)
-      command -v wslpath >/dev/null 2>&1 || return 1
-      wslpath -u "$CODEX_HOME"
-      return 0
-      ;;
-  esac
-
-  local windows_home=""
-  if command -v cmd.exe >/dev/null 2>&1 && command -v wslpath >/dev/null 2>&1; then
-    if ! windows_home="$(cd /mnt/c 2>/dev/null && cmd.exe /d /c "echo %USERPROFILE%" 2>/dev/null | tr -d '\r' | tail -n 1)"; then
-      windows_home=""
-    fi
-    if [ -n "$windows_home" ]; then
-      printf '%s/.codex\n' "$(wslpath -u "$windows_home")"
-      return 0
-    fi
-  fi
-
-  local candidates=() candidate
-  if [ -d /mnt/c/Users ]; then
-    while IFS= read -r candidate; do candidates+=("$(dirname "$candidate")"); done \
-      < <(find /mnt/c/Users -mindepth 3 -maxdepth 3 -type f -path '*/.codex/config.toml' 2>/dev/null)
-  fi
-  [ "${#candidates[@]}" -eq 1 ] || return 1
-  printf '%s\n' "${candidates[0]}"
-}
-
-install_windows_codex_bridge() {  # Bridge portable Codex workflow pieces into the Windows app.
-  local windows_codex_dir="$1" source_json="$REPO_DIR/codex/hooks.json"
-  local linux_rendered windows_rendered dest agents_dest src rel skill_dest
-  local config rendered_config
-  linux_rendered="$(mktemp "${TMPDIR:-/tmp}/codex-hooks-linux.XXXXXX")"
-  windows_rendered="$(mktemp "${TMPDIR:-/tmp}/codex-hooks-windows.XXXXXX")"
-  dest="$windows_codex_dir/hooks.json"
-
-  sed "s#__HOME__#$HOME#g" "$source_json" > "$linux_rendered"
-  if ! jq --arg distro "$WSL_DISTRO" '
-      .hooks |= with_entries(
-        .value |= map(
-          .hooks |= map(
-            .command = ("wsl.exe -d " + ($distro | @json)
-              + " --exec bash -lc " + (.command | @json))
-          )
-        )
-      )
-    ' "$linux_rendered" > "$windows_rendered"; then
-    rm -f "$linux_rendered" "$windows_rendered"
-    warn "could not render Windows Codex App hooks"
-    return 1
-  fi
-  rm -f "$linux_rendered"
-
-  mkdir -p "$windows_codex_dir"
-  if [ -f "$dest" ] && cmp -s "$windows_rendered" "$dest"; then
-    rm -f "$windows_rendered"
-    ok "Windows Codex App hooks already bridged ($dest)"
-  else
-    backup "$dest"
-    install -m 0644 "$windows_rendered" "$dest"
-    rm -f "$windows_rendered"
-    ok "Windows Codex App hooks -> $dest (WSL distro: $WSL_DISTRO)"
-  fi
-
-  agents_dest="$windows_codex_dir/AGENTS.md"
-  if [ ! -f "$agents_dest" ] || ! cmp -s "$REPO_DIR/codex/AGENTS.md" "$agents_dest"; then
-    backup "$agents_dest"
-    install -m 0644 "$REPO_DIR/codex/AGENTS.md" "$agents_dest"
-    ok "Windows Codex App AGENTS.md -> $agents_dest"
-  else
-    ok "Windows Codex App AGENTS.md already current"
-  fi
-
-  if [ -d "$REPO_DIR/workflow/skills" ]; then
-    while IFS= read -r -d '' src; do
-      rel="${src#"$REPO_DIR/workflow/skills/"}"
-      skill_dest="$windows_codex_dir/skills/$rel"
-      mkdir -p "$(dirname "$skill_dest")"
-      if [ ! -f "$skill_dest" ] || ! cmp -s "$src" "$skill_dest"; then
-        backup "$skill_dest"
-        if [ -x "$src" ]; then install -m 0755 "$src" "$skill_dest"
-        else install -m 0644 "$src" "$skill_dest"
-        fi
-      fi
-    done < <(find "$REPO_DIR/workflow/skills" -type f -print0)
-    ok "Windows Codex App workflow skills -> $windows_codex_dir/skills"
-  fi
-
-  config="$windows_codex_dir/config.toml"
-  rendered_config="$(mktemp "${TMPDIR:-/tmp}/codex-windows-config.XXXXXX")"
-  touch "$config"
-  if ! python3 - "$config" "$rendered_config" "$WSL_DISTRO" \
-      "$HOME/.local/bin/mempalace-mcp" "$HOME/.mempalace/palace" <<'PY'
-import json
-import sys
-from pathlib import Path
-
-source, output, distro, command, palace = sys.argv[1:]
-text = Path(source).read_text(encoding="utf-8")
-lines = text.splitlines()
-result = []
-in_mempalace = False
-
-for line in lines:
-    stripped = line.strip()
-    if stripped.startswith("[") and stripped.endswith("]"):
-        section = stripped[1:-1]
-        if section == "mcp_servers.mempalace":
-            in_mempalace = True
-            continue
-        in_mempalace = False
-    if not in_mempalace:
-        result.append(line)
-
-while result and not result[-1].strip():
-    result.pop()
-if result:
-    result.append("")
-result.extend([
-    "[mcp_servers.mempalace]",
-    'command = "wsl.exe"',
-    "args = " + json.dumps([
-        "-d", distro, "--exec", command, "--palace", palace,
-    ]),
-    "startup_timeout_sec = 120",
-])
-Path(output).write_text("\n".join(result) + "\n", encoding="utf-8")
-PY
-  then
-    rm -f "$rendered_config"
-    warn "could not configure the Windows Codex App Mempalace MCP"
-    return 1
-  fi
-  if cmp -s "$rendered_config" "$config"; then
-    rm -f "$rendered_config"
-    ok "Windows Codex App Mempalace MCP already configured"
-  else
-    backup "$config"
-    install -m 0644 "$rendered_config" "$config"
-    rm -f "$rendered_config"
-    ok "Windows Codex App Mempalace MCP registered through WSL"
-  fi
-
-  info "fully restart the Codex App so it reloads AGENTS.md, skills, hooks, and MCPs"
+svc_enable() {
+  codex_enable_service "$SERVICE_MANAGER" "$1" "$2"
 }
 
 # ---------------------------------------------------------------------------
 step "Prerequisites"
 missing=()
 for c in git curl jq; do command -v "$c" >/dev/null 2>&1 || missing+=("$c"); done
-if [ "$OS" = "Darwin" ]; then
-  command -v launchctl >/dev/null 2>&1 || warn "launchctl not found — the proxy service steps will be skipped"
-else
-  command -v systemctl >/dev/null 2>&1 || warn "systemctl not found — the proxy service steps will be skipped"
+SERVICE_MANAGER="$(codex_service_manager "$OS")"
+if [ "$SERVICE_MANAGER" = none ]; then
+  if [ "$IS_WSL" = 1 ]; then
+    warn "systemd user services are unavailable in WSL — service setup will be skipped"
+    info "to enable them, set [boot] systemd=true in /etc/wsl.conf, then run 'wsl --shutdown' from Windows"
+  elif [ "$OS" = "Linux" ]; then
+    warn "systemd user services are unavailable — service setup will be skipped"
+  else
+    warn "launchctl not found — service setup will be skipped"
+  fi
 fi
+case "$SERVICE_MANAGER" in
+  launchd) STATUS_HR="launchctl print gui/$(id -u)/com.user.headroom-proxy" ;;
+  systemd) STATUS_HR="systemctl --user status headroom-proxy" ;;
+  *) STATUS_HR="start it manually: headroom proxy --port 8787 --host 127.0.0.1 --mode cache --no-cache" ;;
+esac
 if [ "${#missing[@]}" -ne 0 ]; then
   if [ "$OS" = "Darwin" ]; then die "install these first: brew install ${missing[*]}"
   else die "install these first via your package manager: ${missing[*]}"; fi
@@ -745,9 +563,12 @@ fi
 
 # ---------------------------------------------------------------------------
 step "Headroom proxy service"
-if { [ "$OS" = "Darwin" ] && command -v launchctl >/dev/null 2>&1; } || command -v systemctl >/dev/null 2>&1; then
-  svc_enable "$REPO_DIR/tools/headroom/headroom-proxy.service" "$REPO_DIR/tools/headroom/com.user.headroom-proxy.plist"
-  [ "$OS" = "Darwin" ] || info "tip: 'loginctl enable-linger $USER' keeps the proxy alive without an active login"
+if [ "$SERVICE_MANAGER" != none ]; then
+  if svc_enable "$REPO_DIR/tools/headroom/headroom-proxy.service" "$REPO_DIR/tools/headroom/com.user.headroom-proxy.plist"; then
+    [ "$SERVICE_MANAGER" != systemd ] || info "tip: 'loginctl enable-linger $USER' keeps the proxy alive without an active login"
+  else
+    warn "automatic Headroom service setup failed. Run manually: headroom proxy --port 8787 --host 127.0.0.1 --mode cache --no-cache"
+  fi
 else
   warn "skipped (no service manager). Run manually: headroom proxy --port 8787 --host 127.0.0.1 --mode cache --no-cache"
 fi
@@ -781,30 +602,12 @@ step "mempalace prune scheduler (daily)"
 # and has no exclude), so it re-ingests tool-result/subagent noise that can only be
 # removed after ingest. A daily job prunes it (see tools/mempalace/mempalace-prune.py).
 mkdir -p "$HOME/.mempalace/logs"
-if [ "$OS" = "Darwin" ] && command -v launchctl >/dev/null 2>&1; then
-  dest="$LAUNCH_DIR/com.user.mempalace-prune.plist"
-  mkdir -p "$LAUNCH_DIR"
-  rendered="$(mktemp)"
-  sed "s#__HOME__#$HOME#g" "$REPO_DIR/tools/mempalace/com.user.mempalace-prune.plist" > "$rendered"
-  if replace_if_changed "$rendered" "$dest"; then launchctl unload "$dest" >/dev/null 2>&1 || true; fi
-  if launchctl list com.user.mempalace-prune >/dev/null 2>&1 \
-      || launchctl load -w "$dest"; then
-    ok "daily prune scheduled (launchd, 03:47)"
-  else
-    warn "could not load prune plist"
-  fi
-elif command -v systemctl >/dev/null 2>&1; then
-  mkdir -p "$UNIT_DIR"
-  units_changed=0
-  for u in mempalace-prune.service mempalace-prune.timer; do
-    if install_if_changed "$REPO_DIR/tools/mempalace/$u" "$UNIT_DIR/$u" 0644; then units_changed=1; fi
-  done
-  [ "$units_changed" = 0 ] || systemctl --user daemon-reload
-  if systemctl --user enable --now mempalace-prune.timer; then
-    ok "daily prune scheduled (systemd timer, 03:47)"
-  else
-    warn "could not enable mempalace-prune.timer"
-  fi
+if [ "$SERVICE_MANAGER" != none ]; then
+  codex_enable_timer "$SERVICE_MANAGER" "daily prune scheduled ($SERVICE_MANAGER, 03:47)" \
+    "$REPO_DIR/tools/mempalace/mempalace-prune.service" \
+    "$REPO_DIR/tools/mempalace/mempalace-prune.timer" \
+    "$REPO_DIR/tools/mempalace/com.user.mempalace-prune.plist" || \
+    warn "could not enable the daily prune scheduler"
 else
   warn "skipped (no scheduler). Run daily: mempalace's python on $BIN_DIR/mempalace-prune.py"
 fi
@@ -816,30 +619,12 @@ step "mempalace snapshot scheduler (every 6h)"
 # so a periodic online .backup of it makes any such corruption fully rebuildable
 # (mempalace repair --mode from-sqlite). Pairs with the SessionStart self-heal hook.
 mkdir -p "$HOME/.mempalace/logs"
-if [ "$OS" = "Darwin" ] && command -v launchctl >/dev/null 2>&1; then
-  dest="$LAUNCH_DIR/com.user.mempalace-snapshot.plist"
-  mkdir -p "$LAUNCH_DIR"
-  rendered="$(mktemp)"
-  sed "s#__HOME__#$HOME#g" "$REPO_DIR/tools/mempalace/com.user.mempalace-snapshot.plist" > "$rendered"
-  if replace_if_changed "$rendered" "$dest"; then launchctl unload "$dest" >/dev/null 2>&1 || true; fi
-  if launchctl list com.user.mempalace-snapshot >/dev/null 2>&1 \
-      || launchctl load -w "$dest"; then
-    ok "6h snapshot scheduled (launchd)"
-  else
-    warn "could not load snapshot plist"
-  fi
-elif command -v systemctl >/dev/null 2>&1; then
-  mkdir -p "$UNIT_DIR"
-  units_changed=0
-  for u in mempalace-snapshot.service mempalace-snapshot.timer; do
-    if install_if_changed "$REPO_DIR/tools/mempalace/$u" "$UNIT_DIR/$u" 0644; then units_changed=1; fi
-  done
-  [ "$units_changed" = 0 ] || systemctl --user daemon-reload
-  if systemctl --user enable --now mempalace-snapshot.timer; then
-    ok "6h snapshot scheduled (systemd timer)"
-  else
-    warn "could not enable mempalace-snapshot.timer"
-  fi
+if [ "$SERVICE_MANAGER" != none ]; then
+  codex_enable_timer "$SERVICE_MANAGER" "6h snapshot scheduled ($SERVICE_MANAGER)" \
+    "$REPO_DIR/tools/mempalace/mempalace-snapshot.service" \
+    "$REPO_DIR/tools/mempalace/mempalace-snapshot.timer" \
+    "$REPO_DIR/tools/mempalace/com.user.mempalace-snapshot.plist" || \
+    warn "could not enable the snapshot scheduler"
 else
   warn "skipped (no scheduler). Run periodically: $BIN_DIR/mempalace-snapshot.sh"
 fi
@@ -855,13 +640,15 @@ step "graphify→mempalace reseed (SessionStart hook)"
 # alongside the live MCP server corrupts the palace's FTS5 index, so the hook never
 # runs one. See workflow/hooks/graphify-reseed-session.sh.
 reseed_repos=()
-for repo in "${GRAPHIFY_REPOS[@]}"; do
-  if [ -d "$repo" ]; then
-    reseed_repos+=("$repo")
-  else
-    warn "skipping missing graphify reseed repo: $repo"
-  fi
-done
+if [ "${#GRAPHIFY_REPOS[@]}" -gt 0 ]; then
+  for repo in "${GRAPHIFY_REPOS[@]}"; do
+    if [ -d "$repo" ]; then
+      reseed_repos+=("$repo")
+    else
+      warn "skipping missing graphify reseed repo: $repo"
+    fi
+  done
+fi
 if [ "${#reseed_repos[@]}" -eq 0 ]; then
   reseed_repos=("$REPO_DIR")
 fi
@@ -870,10 +657,10 @@ mkdir -p "$HOME/.mempalace"
 printf '%s\n' "${reseed_repos[@]}" > "$HOME/.mempalace/graphify-repos.conf"
 ok "reseed repo list -> ~/.mempalace/graphify-repos.conf (${#reseed_repos[@]} repo(s))"
 # Migrate older installs: remove the now-retired nightly cron if present.
-if [ "$OS" = "Darwin" ] && command -v launchctl >/dev/null 2>&1; then
+if [ "$SERVICE_MANAGER" = launchd ]; then
   old="$LAUNCH_DIR/com.user.graphify-reseed.plist"
   if [ -f "$old" ]; then launchctl unload "$old" >/dev/null 2>&1 || true; rm -f "$old"; ok "removed retired nightly reseed cron (now session-triggered)"; fi
-elif command -v systemctl >/dev/null 2>&1; then
+elif [ "$SERVICE_MANAGER" = systemd ]; then
   old="$UNIT_DIR/graphify-reseed.timer"
   if [ -f "$old" ]; then
     systemctl --user disable --now graphify-reseed.timer >/dev/null 2>&1 || true

@@ -37,6 +37,11 @@ else
   done < "$CONF"
 fi
 
+if [ "${#REPOS[@]}" -eq 0 ]; then
+  echo "graphify-sync: no repositories configured"
+  exit 0
+fi
+
 # node:edge signature from the report (stable across labeling). Extract the two
 # numbers separately to avoid matching the multibyte "·" separator. Empty if no report.
 sig_of() {

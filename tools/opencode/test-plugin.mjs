@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 
 import assert from "node:assert/strict"
-import { mkdtemp, readFile, rm, stat } from "node:fs/promises"
+import { mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { pathToFileURL } from "node:url"
@@ -34,7 +34,11 @@ globalThis.Bun = {
   },
 }
 
-const { WorkflowPlugin } = await import(`${pathToFileURL(pluginPath).href}?event-test=1`)
+// The plugin is valid TypeScript and plain JavaScript. Import a temporary .mjs copy
+// so this lifecycle test works on Node releases that predate native type stripping.
+const modulePath = join(home, "workflow-plugin.mjs")
+await writeFile(modulePath, await readFile(pluginPath, "utf8"))
+const { WorkflowPlugin } = await import(`${pathToFileURL(modulePath).href}?event-test=1`)
 const hooks = await WorkflowPlugin({ directory: "/tmp/opencode-plugin-test" })
 
 await hooks["chat.params"]({ sessionID: "primary", agent: "build" })

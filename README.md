@@ -121,7 +121,7 @@ Use a single agent. Update this typo and run the focused check.
 | Codex worker | Configured Codex default | `danger-full-access`, approval policy `never`, implementation and verification |
 | OpenCode controller | `openai/gpt-5.6-sol` | Only writer in OpenCode; owns the actual diff and tests |
 | OpenCode scouts | `openai/gpt-5.6-terra` | Bounded repository or official-documentation reconnaissance |
-| OpenCode memory/service | `openai/gpt-5.6-luna` | Bounded on-demand MCP access without loading those schemas into normal turns |
+| OpenCode support agents | `openai/gpt-5.6-terra` | Bounded reconnaissance, memory recall, and on-demand MCP access without loading those schemas into normal turns |
 
 The Codex worker uses an isolated per-process `CODEX_HOME` with zero inner MCP servers
 or plugins. It links the existing login and retains only model routing,

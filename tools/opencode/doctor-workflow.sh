@@ -70,7 +70,7 @@ elif jq -e \
   '
   (.mcp.MCP_DOCKER.command // null) as $docker_command |
   .model == "openai/gpt-5.6-sol" and
-  .small_model == "openai/gpt-5.6-luna" and
+  .small_model == "openai/gpt-5.6-terra" and
   .provider.openai.options.baseURL == $headroom_openai and
   ($docker_command == null or (
     $docker_command == ["docker", "mcp", "gateway", "run", "--tools", "mcp-exec"] or

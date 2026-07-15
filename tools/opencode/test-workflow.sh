@@ -57,6 +57,16 @@ run_layout() {
   grep -Fq 'Do not wait for the user to invoke an agent' "$REPO_DIR/opencode/skills/model-team/SKILL.md" \
     && pass 'routing skill requires automatic dispatch' \
     || fail 'routing skill does not require automatic dispatch'
+  grep -Fq 'valid only for the current OpenCode command' "$REPO_DIR/opencode/skills/model-team/SKILL.md" \
+    && pass 'routing skill defines process-scoped Claude session lifetime' \
+    || fail 'routing skill does not define process-scoped Claude session lifetime'
+  grep -Fq 'Complete required review and repair rounds before the current OpenCode command exits.' \
+      "$REPO_DIR/opencode/skills/model-team/SKILL.md" \
+    && pass 'routing skill keeps review and repair inside one command' \
+    || fail 'routing skill can exit before review and repair complete'
+  grep -Fq 'start a fresh Claude session' "$REPO_DIR/opencode/skills/model-team/SKILL.md" \
+    && pass 'routing skill gives later reviews a fresh-session path' \
+    || fail 'routing skill does not explain later review sessions'
   grep -Fq 'claude-worker_claude' "$REPO_DIR/opencode/agents/build.md" \
     && pass 'build agent enables the bounded Claude worker' \
     || fail 'build agent does not enable the bounded Claude worker'
@@ -70,6 +80,11 @@ run_layout() {
     && grep -Fq 'mempalace_*: true' "$REPO_DIR/opencode/agents/memory.md" \
     && pass 'Mempalace schemas are isolated behind the automatic memory agent' \
     || fail 'Mempalace schemas leak into ordinary build sessions'
+  grep -Fq 'model: openai/gpt-5.6-terra' "$REPO_DIR/opencode/agents/memory.md" \
+    && grep -Fq 'model: openai/gpt-5.6-terra' "$REPO_DIR/opencode/agents/service.md" \
+    && ! grep -R -Fq 'gpt-5.6-luna' "$REPO_DIR/opencode" \
+    && pass 'bounded OpenCode support agents use Terra without Luna fallback' \
+    || fail 'bounded OpenCode support routing is not fully migrated to Terra'
   grep -Fq 'permission:' "$REPO_DIR/opencode/agents/explore.md" \
     && grep -Fq 'edit: deny' "$REPO_DIR/opencode/agents/explore.md" \
     && ! grep -Fq 'Graphify' "$REPO_DIR/opencode/agents/explore.md" \
@@ -84,7 +99,7 @@ run_layout() {
     || fail 'installer does not reject unsupported Python versions'
   jq -e '
     .model == "openai/gpt-5.6-sol" and
-    .small_model == "openai/gpt-5.6-luna" and
+    .small_model == "openai/gpt-5.6-terra" and
     .provider.openai.options.baseURL == "http://127.0.0.1:8787/v1" and
     .mcp.mempalace.command == ["mempalace-mcp"] and
     .tools["MCP_DOCKER_*"] == false
@@ -184,7 +199,7 @@ SH
 
   jq -e --arg claude_bin "$fake_bin/claude" '
     .model == "openai/gpt-5.6-sol" and
-    .small_model == "openai/gpt-5.6-luna" and
+    .small_model == "openai/gpt-5.6-terra" and
     .plugin == ["keep-me"] and
     .provider.openai.options.baseURL == "http://127.0.0.1:8787/v1" and
     .provider.openai.options.apiKey == "preserve-me" and
@@ -335,6 +350,46 @@ PY
     && pass 'reply resumes the original Claude session in review mode' \
     || fail 'reply did not resume the original Claude session in review mode'
 
+  if FAKE_CLAUDE_LOG="$log" python3 - "$REPO_DIR/tools/opencode/claude-worker-mcp" "$fake" <<'PY'
+import json
+import subprocess
+import sys
+
+worker, fake = sys.argv[1:]
+process = subprocess.Popen(
+    [sys.executable, worker, "--claude-bin", fake],
+    stdin=subprocess.PIPE,
+    stdout=subprocess.PIPE,
+    stderr=subprocess.PIPE,
+    text=True,
+)
+assert process.stdin is not None
+assert process.stdout is not None
+process.stdin.write(json.dumps({
+    "jsonrpc": "2.0",
+    "id": 1,
+    "method": "tools/call",
+    "params": {
+        "name": "claude-reply",
+        "arguments": {"sessionId": "previous-process-session", "prompt": "review"},
+    },
+}) + "\n")
+process.stdin.flush()
+response = json.loads(process.stdout.readline())
+process.stdin.close()
+process.wait(timeout=5)
+message = response.get("error", {}).get("message", "")
+assert message == (
+    "sessionId is not owned by this worker process; "
+    "finish review in the originating OpenCode command or start a fresh Claude session"
+), message
+PY
+  then
+    pass 'worker explains process-scoped session ownership'
+  else
+    fail 'worker returns an ambiguous expired-session error'
+  fi
+
   if FAKE_CLAUDE_LOG="$log" FAKE_CLAUDE_PID_FILE="$temp/claude.pid" \
     FAKE_CLAUDE_CANCEL_LOG="$temp/cancelled" \
     python3 - "$REPO_DIR/tools/opencode/claude-worker-mcp" "$fake" \
@@ -405,7 +460,7 @@ run_plugin() {
     fail 'Node.js is required for the OpenCode lifecycle event test'
     return
   fi
-  if node --experimental-strip-types "$REPO_DIR/tools/opencode/test-plugin.mjs" \
+  if node "$REPO_DIR/tools/opencode/test-plugin.mjs" \
     "$REPO_DIR/opencode/plugins/workflow.ts"; then
     pass 'OpenCode lifecycle events inject context, isolate subagents, refresh graphs, and write recaps'
   else
