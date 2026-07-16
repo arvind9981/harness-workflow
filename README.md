@@ -236,7 +236,9 @@ Docker profile and skips optional Docker integration cleanly when unavailable.
 
 - macOS uses `launchd` user agents.
 - Linux uses `systemd --user` when available.
-- On WSL, it uses `systemd --user` when available and otherwise prints manual service commands.
+- WSL with systemd uses the same systemd user unit as native Linux.
+- Without a functioning systemd user manager, `init.sh` skips automatic service
+  setup and explains how to enable systemd and restart WSL.
 - The optional Windows Codex App bridge renders WSL-aware hook and MCP commands without copying Linux-specific configuration into the Windows Codex home.
 
 Repository locations are discovered or explicitly supplied; nothing requires

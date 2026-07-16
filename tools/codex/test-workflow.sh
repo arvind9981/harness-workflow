@@ -173,6 +173,12 @@ EOF
     output="$(PATH="$fake_bin:/usr/bin:/bin" TEST_LOG="$tmp/service.log" \
       SYSTEMCTL_USER_READY=0 bash -c '. "$1"; codex_service_manager Linux' _ "$services")"
     assert_eq none "$output" 'Linux skips a non-functioning systemd user manager'
+    output="$(PATH="$fake_bin:/usr/bin:/bin" TEST_LOG="$tmp/service.log" IS_WSL=1 \
+      SYSTEMCTL_USER_READY=1 bash -c '. "$1"; codex_service_manager Linux' _ "$services")"
+    assert_eq systemd "$output" 'WSL selects the Linux systemd user manager when available'
+    output="$(PATH="$fake_bin:/usr/bin:/bin" TEST_LOG="$tmp/service.log" IS_WSL=1 \
+      SYSTEMCTL_USER_READY=0 bash -c '. "$1"; codex_service_manager Linux' _ "$services")"
+    assert_eq none "$output" 'WSL skips automatic service setup without a systemd user manager'
     output="$(PATH="$fake_bin:/usr/bin:/bin" TEST_LOG="$tmp/service.log" \
       bash -c '. "$1"; codex_service_manager Darwin' _ "$services")"
     assert_eq launchd "$output" 'macOS selects launchd'
@@ -192,6 +198,14 @@ EOF
         codex_enable_timer launchd "6h snapshot scheduled" "$REPO_DIR/tools/mempalace/mempalace-snapshot.service" "$REPO_DIR/tools/mempalace/mempalace-snapshot.timer" "$REPO_DIR/tools/mempalace/com.user.mempalace-snapshot.plist"
       ' _ "$services"
     assert_file_contains "$tmp/service.log" 'launchctl load -w' 'launchd service and scheduler branches execute'
+    assert_file_contains "$tmp/launch/com.user.headroom-proxy.plist" '<string>token</string>' \
+      'launchd renders Headroom token mode'
+    assert_file_contains "$tmp/launch/com.user.headroom-proxy.plist" '<string>--intercept-tool-results</string>' \
+      'launchd renders Headroom tool-result interception'
+    assert_file_contains "$tmp/launch/com.user.headroom-proxy.plist" '<string>--lossless</string>' \
+      'launchd renders Headroom lossless mode'
+    assert_file_not_contains "$tmp/launch/com.user.headroom-proxy.plist" '<string>cache</string>' \
+      'launchd does not render Headroom cache mode'
 
     : > "$tmp/service.log"
     HOME="$tmp/home" PATH="$fake_bin:/usr/bin:/bin" TEST_LOG="$tmp/service.log" \
@@ -209,6 +223,11 @@ EOF
       ' _ "$services"
     assert_file_contains "$tmp/service.log" 'systemctl --user enable --now headroom-proxy.service' \
       'systemd Headroom service branch executes'
+    assert_file_contains "$tmp/units/headroom-proxy.service" \
+      'ExecStart=%h/.local/bin/headroom proxy --port 8787 --host 127.0.0.1 --mode token --no-cache --intercept-tool-results --lossless' \
+      'Linux and WSL install the lossless Headroom systemd unit'
+    assert_file_not_contains "$tmp/units/headroom-proxy.service" '--mode cache' \
+      'Linux and WSL systemd unit does not freeze prior turns'
     assert_file_contains "$tmp/service.log" 'systemctl --user enable --now mempalace-prune.timer' \
       'systemd prune scheduler branch executes'
     assert_file_contains "$tmp/service.log" 'systemctl --user enable --now mempalace-snapshot.timer' \
@@ -227,6 +246,22 @@ EOF
       ' _ "$services"
     assert_file_contains "$tmp/service.log" 'systemctl --user restart headroom-proxy.service' \
       'systemd restarts a changed service that is already active'
+
+    : > "$tmp/service.log"
+    HOME="$tmp/home" PATH="$fake_bin:/usr/bin:/bin" TEST_LOG="$tmp/service.log" \
+      SYSTEMCTL_SERVICE_ACTIVE=1 REPO_DIR="$REPO_DIR" UNIT_DIR="$tmp/units" \
+      LAUNCH_DIR="$tmp/launch" bash -c '
+        backup() { :; }
+        ok() { :; }
+        warn() { :; }
+        install_if_changed() { return 1; }
+        . "$1"
+        codex_enable_service systemd "$REPO_DIR/tools/headroom/headroom-proxy.service" "$REPO_DIR/tools/headroom/com.user.headroom-proxy.plist"
+      ' _ "$services"
+    assert_file_not_contains "$tmp/service.log" 'systemctl --user restart headroom-proxy.service' \
+      'systemd leaves an unchanged active Headroom service running'
+    assert_file_not_contains "$tmp/service.log" 'systemctl --user enable --now headroom-proxy.service' \
+      'systemd does not re-enable an unchanged active Headroom service'
   fi
 
   if [ -f "$wsl" ]; then
@@ -320,10 +355,16 @@ EOF
   assert_file_contains "$workflow" '/bin/bash' 'macOS CI explicitly exercises stock Bash'
   assert_file_contains "$REPO_DIR/README.md" '`init.sh` supports macOS, Linux, and WSL' \
     'README explicitly documents WSL support'
-  assert_file_contains "$REPO_DIR/README.md" 'On WSL, it uses `systemd --user` when available' \
-    'README documents the WSL systemd path'
-  assert_file_contains "$REPO_DIR/README.md" 'prints manual service commands' \
-    'README documents the WSL service fallback'
+  assert_file_contains "$REPO_DIR/README.md" \
+    'WSL with systemd uses the same systemd user unit as native Linux.' \
+    'README states that WSL and native Linux share the Headroom unit'
+  assert_file_contains "$REPO_DIR/README.md" \
+    'Without a functioning systemd user manager, `init.sh` skips automatic service' \
+    'README documents the WSL no-systemd behavior'
+  assert_file_contains "$REPO_DIR/init.sh" 'set [boot] systemd=true in /etc/wsl.conf' \
+    'WSL fallback explains how to enable systemd'
+  assert_file_contains "$REPO_DIR/init.sh" "run 'wsl --shutdown' from Windows" \
+    'WSL fallback explains how to restart the distro environment'
   assert_file_contains "$REPO_DIR/README.md" 'Windows Codex App bridge' \
     'README documents the optional Windows Codex bridge'
 
