@@ -449,12 +449,24 @@ test_discovery() {
 test_installer() {
   local tmp home codex_dir config first_config_hash first_hooks_hash first_backups
   local second_config_hash second_hooks_hash second_backups config_backup fresh_dir env_file first_env_hash second_env_hash
+  local first_zsh_backups second_zsh_backups linux_home shell_output
   tmp="$(mktemp -d "${TMPDIR:-/tmp}/codex-installer.XXXXXX")"
   home="$tmp/home"
   codex_dir="$tmp/codex"
   config="$codex_dir/config.toml"
   env_file="$codex_dir/.env"
-  mkdir -p "$home" "$codex_dir" "$tmp/bin"
+  mkdir -p "$home/.local/bin" "$codex_dir" "$tmp/bin"
+
+  cat > "$home/.zshrc" <<'EOF'
+# preserve-this-zshrc-comment
+sleep 6
+printf 'slow-tail-ran\n'
+EOF
+  cat > "$home/.local/bin/gh" <<'EOF'
+#!/usr/bin/env sh
+printf 'fake-gh\n'
+EOF
+  chmod +x "$home/.local/bin/gh"
 
   cat > "$env_file" <<'EOF'
 # preserve-this-env-comment
@@ -536,6 +548,19 @@ PY
     'PATH=/opt/homebrew/bin:/opt/homebrew/sbin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin' \
     'macOS installer reconciles the Codex Desktop PATH'
   assert_eq 600 "$(file_mode "$env_file")" 'macOS installer keeps .env private'
+  assert_file_contains "$home/.zshrc" \
+    '# BEGIN HARNESS CODEX SHELL PROBE' \
+    'macOS installer adds the managed shell-probe guard'
+  assert_file_contains "$home/.zshrc" \
+    '# preserve-this-zshrc-comment' \
+    'macOS installer preserves existing zsh configuration'
+  if [ -x /bin/zsh ]; then
+    shell_output="$(HOME="$home" ZDOTDIR="$home" /bin/zsh -ilc 'command -v gh')"
+    assert_eq "$home/.local/bin/gh" "$shell_output" \
+      'managed shell-probe guard exposes user tools without running the slow interactive tail'
+  else
+    pass 'managed shell-probe guard execution is macOS-only'
+  fi
 
   config_backup="$(find "$codex_dir" -maxdepth 1 -type f -name 'config.toml.bak-codex-*' | head -n 1)"
   if [ -n "$config_backup" ]; then
@@ -553,26 +578,37 @@ PY
   first_hooks_hash="$(hash_file "$codex_dir/hooks.json")"
   first_env_hash="$(hash_file "$env_file")"
   first_backups="$(find "$codex_dir" -type f -name '*.bak-codex-*' | wc -l | tr -d ' ')"
+  first_zsh_backups="$(find "$home" -maxdepth 1 -type f -name '.zshrc.bak-codex-*' | wc -l | tr -d ' ')"
   HOME="$home" CODEX_DIR="$codex_dir" BIN_DIR="$tmp/bin" CODEX_INSTALL_OS=Darwin \
     "$REPO_DIR/tools/codex/install-codex.sh" >/dev/null
   second_config_hash="$(hash_file "$config")"
   second_hooks_hash="$(hash_file "$codex_dir/hooks.json")"
   second_env_hash="$(hash_file "$env_file")"
   second_backups="$(find "$codex_dir" -type f -name '*.bak-codex-*' | wc -l | tr -d ' ')"
+  second_zsh_backups="$(find "$home" -maxdepth 1 -type f -name '.zshrc.bak-codex-*' | wc -l | tr -d ' ')"
 
   assert_eq "$first_config_hash" "$second_config_hash" 'second installer run preserves config hash'
   assert_eq "$first_hooks_hash" "$second_hooks_hash" 'second installer run preserves managed-file hash'
   assert_eq "$first_env_hash" "$second_env_hash" 'second installer run preserves Codex Desktop env hash'
   assert_eq "$first_backups" "$second_backups" 'second installer run creates no backups'
+  assert_eq "$first_zsh_backups" "$second_zsh_backups" \
+    'second installer run creates no shell-profile backups'
 
   fresh_dir="$tmp/fresh-codex"
-  HOME="$home" CODEX_DIR="$fresh_dir" BIN_DIR="$tmp/bin" CODEX_INSTALL_OS=Linux \
+  linux_home="$tmp/linux-home"
+  mkdir -p "$linux_home"
+  HOME="$linux_home" CODEX_DIR="$fresh_dir" BIN_DIR="$tmp/bin" CODEX_INSTALL_OS=Linux \
     "$REPO_DIR/tools/codex/install-codex.sh" >/dev/null 2>&1
   assert_eq 600 "$(file_mode "$fresh_dir/config.toml")" 'fresh config.toml is created private'
   if [ -e "$fresh_dir/.env" ]; then
     fail 'Linux installer leaves the Codex Desktop env absent'
   else
     pass 'Linux installer leaves the Codex Desktop env absent'
+  fi
+  if [ -e "$linux_home/.zshrc" ]; then
+    fail 'Linux installer leaves zsh configuration unmanaged'
+  else
+    pass 'Linux installer leaves zsh configuration unmanaged'
   fi
 
   rm -rf "$tmp"
@@ -792,11 +828,16 @@ case "$*" in
   'mcp tools ls --format=list --gateway-arg=--profile=xebia --gateway-arg=--tools=mcp-exec') printf 'mcp-exec\nmcp-find\nmcp-activate-profile\n' ;;
 esac
 EOF
+  cat > "$fake_bin/zsh" <<'EOF'
+#!/usr/bin/env bash
+printf '/opt/homebrew/bin/gh\n'
+EOF
   ln -s "$TEST_PYTHON" "$fake_bin/python3"
-  chmod +x "$fake_bin/codex-explicit" "$fake_bin/docker"
+  chmod +x "$fake_bin/codex-explicit" "$fake_bin/docker" "$fake_bin/zsh"
 
   output="$(HOME="$home" CODEX_DIR="$codex_dir" CODEX_BIN="$fake_bin/codex-explicit" \
-    CODEX_DOCTOR_RUNTIME=0 TEST_LOG="$log" PATH="$fake_bin:/usr/bin:/bin" \
+    CODEX_DOCTOR_RUNTIME=0 CODEX_DOCTOR_OS=Darwin CODEX_DOCTOR_ZSH="$fake_bin/zsh" \
+    TEST_LOG="$log" PATH="$fake_bin:/usr/bin:/bin" \
     "$REPO_DIR/tools/codex/doctor-workflow.sh" 2>&1)"
   assert_text_contains "$output" 'PASS Codex executable resolved:' 'doctor resolves explicit or bundled Codex'
   assert_text_contains "$output" 'PASS MCP_DOCKER startup timeout is 60 seconds' 'doctor requires MCP_DOCKER startup headroom'
@@ -807,6 +848,9 @@ EOF
   assert_text_contains "$output" 'PASS Docker MCP dynamic gateway exposes 8 management tools' 'doctor checks bounded dynamic tool inventory'
   assert_text_contains "$output" 'PASS Docker MCP dynamic gateway includes mcp-exec' 'doctor checks dynamic execution without calling an external tool'
   assert_text_contains "$output" 'PASS workflow repository included in discovery' 'doctor seeds discovery with REPO_DIR'
+  assert_text_contains "$output" \
+    'PASS macOS login-shell probe resolves GitHub CLI within four seconds' \
+    'doctor verifies the Codex Desktop shell-environment boundary'
   if printf '%s\n' "$output" | grep -Fq 'CLI drain remains fallback'; then
     fail 'doctor removes unconditional CLI-drain warning'
   else

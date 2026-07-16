@@ -1,0 +1,19 @@
+# BEGIN HARNESS CODEX SHELL PROBE
+# GUI tools capture the login-shell environment without a terminal. Export the
+# lightweight developer PATH and skip prompt, completion, and version-manager
+# startup that can exceed the Codex Desktop five-second environment timeout.
+if [[ ! -t 0 || ! -t 1 ]]; then
+  typeset -U path PATH
+  path=(
+    $HOME/.local/bin(N)
+    /opt/homebrew/bin(N)
+    /opt/homebrew/sbin(N)
+    /opt/homebrew/opt/libpq/bin(N)
+    /usr/local/bin(N)
+    /usr/local/sbin(N)
+    $path
+  )
+  export PATH
+  return
+fi
+# END HARNESS CODEX SHELL PROBE

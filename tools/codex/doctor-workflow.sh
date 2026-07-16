@@ -11,6 +11,8 @@ CONF="${GRAPHIFY_REPOS_CONF:-$HOME/.mempalace/graphify-repos.conf}"
 PENDING="$HOME/.mempalace/hook_state/graphify-pending-mines"
 EMBEDDER="$HOME/.mempalace/palace/mempalace_embedder.json"
 RUNTIME="${CODEX_DOCTOR_RUNTIME:-1}"
+DOCTOR_OS="${CODEX_DOCTOR_OS:-$(uname -s)}"
+DOCTOR_ZSH="${CODEX_DOCTOR_ZSH:-/bin/zsh}"
 PYTHON_BIN="$(codex_python_resolve || true)"
 
 PASS=0
@@ -451,6 +453,27 @@ check_headroom() {
 
   warn "headroom proxy not live and ready on 127.0.0.1:8787"
 }
+
+check_macos_shell_probe() {
+  local output rc
+
+  [ "$DOCTOR_OS" = Darwin ] || return 0
+  if [ -z "$PYTHON_BIN" ] || [ ! -x "$DOCTOR_ZSH" ]; then
+    warn "macOS login-shell probe could not run"
+    return 0
+  fi
+
+  output="$(run_bounded 4 "$DOCTOR_ZSH" -ilc 'command -v gh' 2>&1)"
+  rc=$?
+  if [ "$rc" -eq 0 ] && printf '%s\n' "$output" | grep -Eq '(^|/)gh$'; then
+    pass "macOS login-shell probe resolves GitHub CLI within four seconds"
+  elif [ "$rc" -eq 124 ]; then
+    warn "macOS login-shell probe exceeds four seconds; Codex Desktop may time out"
+  else
+    warn "macOS login-shell probe does not resolve GitHub CLI"
+  fi
+}
+
 check_embedder_sidecar() {
   if [ ! -f "$EMBEDDER" ]; then
     warn "$EMBEDDER missing"
@@ -574,6 +597,7 @@ check_hook_installation
 check_skill_installation
 check_fast_profile
 check_codex_config
+check_macos_shell_probe
 check_mcp_docker
 if [ "$RUNTIME" != 0 ]; then
   check_headroom
