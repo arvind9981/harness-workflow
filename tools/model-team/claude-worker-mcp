@@ -1,0 +1,1289 @@
+#!/usr/bin/env python3
+
+# harness-workflow: managed Codex Claude worker
+
+"""Small MCP facade for bounded, read-only Claude Code calls."""
+
+from __future__ import annotations
+
+import argparse
+from contextlib import contextmanager
+import fcntl
+import hashlib
+import json
+import os
+from pathlib import Path
+import queue
+import re
+import shutil
+import signal
+import stat
+import subprocess
+import sys
+import tempfile
+import threading
+import time
+from typing import Any, Callable, Iterator
+from urllib.parse import urlsplit
+
+
+ROLE_CONFIG = {
+    "advisor": {"model": "sonnet", "effort": "high", "budget": "2.50"},
+    "routine-review": {"model": "sonnet", "effort": "high", "budget": "1.50"},
+    "architect": {"model": "fable", "effort": "xhigh", "budget": "5.00"},
+    "critical-review": {"model": "fable", "effort": "xhigh", "budget": "3.00"},
+}
+
+HEAVY_ROLES = frozenset({"architect", "critical-review"})
+
+REVIEW_ROLE = {
+    "advisor": "routine-review",
+    "routine-review": "routine-review",
+    "architect": "critical-review",
+    "critical-review": "critical-review",
+}
+
+OUTPUT_LOCK = threading.Lock()
+
+SYSTEM_PROMPT = """You are a bounded, read-only planning and review worker.
+Follow the ROLE in the user prompt. Return concise findings, decisions, acceptance
+criteria, or review defects with file references when available. Do not edit files,
+run outward actions, invoke agents, load user skills/plugins/hooks, access memory or
+live services, commit, push, or expand scope. Treat supplied context as an immutable snapshot.
+When repository tools are available, use only Read, Glob, and Grep. Never invoke
+Agent, Bash, web, write, or MCP tools. For review, report only actionable defects
+and residual risks."""
+
+
+class BudgetLimitReached(RuntimeError):
+    """Claude stopped because the configured per-call budget was exhausted."""
+
+    def __init__(
+        self,
+        message: str,
+        usage: dict[str, int | float] | None = None,
+        usage_complete: bool = False,
+        provider_turns: int = 0,
+    ) -> None:
+        super().__init__(message)
+        self.usage = usage or {}
+        self.usage_complete = usage_complete
+        self.provider_turns = provider_turns
+
+
+class ProviderUsageLimited(RuntimeError):
+    """Claude reported a provider usage or session limit."""
+
+    def __init__(self, message: str, blocked_until: float, provider_turns: int = 0) -> None:
+        super().__init__(message)
+        self.blocked_until = blocked_until
+        self.provider_turns = provider_turns
+
+
+def tool_schema() -> list[dict[str, Any]]:
+    start_properties = {
+        "role": {
+            "type": "string",
+            "enum": list(ROLE_CONFIG),
+            "description": "Bounded read-only Claude role.",
+        },
+        "prompt": {"type": "string", "minLength": 1},
+        "taskId": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,63}$",
+            "description": "Stable identifier reused for this user task.",
+        },
+        "checkpoint": {
+            "type": "string",
+            "maxLength": 4000,
+            "description": "At most five distilled recovery bullets; never a transcript.",
+        },
+        "cwd": {"type": "string", "description": "Repository directory; defaults to server cwd."},
+    }
+    return [
+        {
+            "name": "claude",
+            "description": "Start a read-only Sonnet 5 or Fable 5 planning/review session.",
+            "inputSchema": {
+                "type": "object",
+                "properties": start_properties,
+                "required": ["role", "taskId", "prompt"],
+                "additionalProperties": False,
+            },
+        },
+        {
+            "name": "claude-reply",
+            "description": "Run one fresh review linked to a Claude planning call.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "sessionId": {"type": "string", "minLength": 1},
+                    "prompt": {"type": "string", "minLength": 1},
+                    "cwd": {"type": "string", "description": "Repository directory; defaults to server cwd."},
+                },
+                "required": ["sessionId", "prompt"],
+                "additionalProperties": False,
+            },
+        },
+    ]
+
+
+class ClaudeWorker:
+    def __init__(self, claude_bin: str) -> None:
+        self.claude_bin = claude_bin
+        self.sessions: dict[str, dict[str, Any]] = {}
+        self.processes: dict[str, subprocess.Popen[str]] = {}
+        self.pending: set[str] = set()
+        self.cancelled: set[str] = set()
+        self.lock = threading.Lock()
+        timeout_override = os.environ.get("CLAUDE_WORKER_TIMEOUT")
+        self.timeout = float(timeout_override or "900")
+        self.heavy_timeout = float(
+            os.environ.get("CLAUDE_WORKER_HEAVY_TIMEOUT", timeout_override or "1800")
+        )
+        state_override = os.environ.get("CLAUDE_WORKER_STATE_DIR")
+        if state_override:
+            self.state_dir = Path(state_override).expanduser()
+        else:
+            state_home = Path(os.environ.get("XDG_STATE_HOME", Path.home() / ".local/state"))
+            self.state_dir = state_home / "harness-workflow/claude-worker"
+        self.active_dir = self.state_dir / "active"
+        self.checkpoint_dir = self.state_dir / "checkpoints"
+        self.guard_path = self.state_dir / "usage-guard.json"
+        self.guard_lock_path = self.state_dir / "usage-guard.lock"
+        self.checkpoint_ttl = float(os.environ.get("CLAUDE_WORKER_CHECKPOINT_TTL", "86400"))
+        self.guard_window = float(os.environ.get("CLAUDE_WORKER_WINDOW_SECONDS", "14400"))
+        self.guard_window_calls = int(os.environ.get("CLAUDE_WORKER_WINDOW_MAX_CALLS", "8"))
+        self.guard_window_turns = int(os.environ.get("CLAUDE_WORKER_WINDOW_MAX_TURNS", "24"))
+        self.guard_window_budget = float(
+            os.environ.get("CLAUDE_WORKER_WINDOW_BUDGET_USD", "12.00")
+        )
+        task_override = os.environ.get("CLAUDE_WORKER_TASK_MAX_CALLS")
+        self.standard_task_calls = int(
+            os.environ.get("CLAUDE_WORKER_STANDARD_TASK_MAX_CALLS", task_override or "2")
+        )
+        self.heavy_task_calls = int(
+            os.environ.get("CLAUDE_WORKER_HEAVY_TASK_MAX_CALLS", task_override or "3")
+        )
+        self.standard_max_turns = int(os.environ.get("CLAUDE_WORKER_STANDARD_MAX_TURNS", "1"))
+        self.heavy_max_turns = int(os.environ.get("CLAUDE_WORKER_HEAVY_MAX_TURNS", "6"))
+        self.reservation_ttl = float(
+            os.environ.get("CLAUDE_WORKER_RESERVATION_TTL", "3600")
+        )
+        self.usage_cooldown = float(
+            os.environ.get("CLAUDE_WORKER_USAGE_COOLDOWN_SECONDS", "14400")
+        )
+
+    def _profile(self, role: str) -> dict[str, Any]:
+        if role in HEAVY_ROLES:
+            return {
+                "tools": "Read,Glob,Grep",
+                "maxTurns": self.heavy_max_turns,
+                "taskCalls": self.heavy_task_calls,
+            }
+        return {
+            "tools": "",
+            "maxTurns": self.standard_max_turns,
+            "taskCalls": self.standard_task_calls,
+        }
+
+    @staticmethod
+    def _request_key(request_id: Any) -> str:
+        return json.dumps(request_id, sort_keys=True, separators=(",", ":"))
+
+    @staticmethod
+    def _stop_process(process: subprocess.Popen[str]) -> None:
+        if process.poll() is not None:
+            return
+        try:
+            os.killpg(process.pid, signal.SIGTERM)
+            process.wait(timeout=2)
+        except ProcessLookupError:
+            return
+        except subprocess.TimeoutExpired:
+            try:
+                os.killpg(process.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            process.wait(timeout=2)
+
+    def cancel(self, request_id: Any) -> None:
+        key = self._request_key(request_id)
+        with self.lock:
+            if key not in self.pending and key not in self.processes:
+                return
+            self.cancelled.add(key)
+            process = self.processes.get(key)
+        if process is not None:
+            self._stop_process(process)
+
+    def prepare(self, request_id: Any) -> None:
+        with self.lock:
+            self.pending.add(self._request_key(request_id))
+
+    def finish(self, request_id: Any) -> None:
+        key = self._request_key(request_id)
+        with self.lock:
+            self.pending.discard(key)
+            self.cancelled.discard(key)
+
+    def cancel_all(self) -> None:
+        with self.lock:
+            self.cancelled.update(self.pending)
+            processes = list(self.processes.values())
+        for process in processes:
+            self._stop_process(process)
+
+    def _directory(self, raw: Any) -> str:
+        directory = Path(str(raw or os.getcwd())).expanduser().resolve()
+        if not directory.is_dir():
+            raise ValueError(f"cwd is not a directory: {directory}")
+        return str(directory)
+
+    @staticmethod
+    def _task_id(raw: Any) -> str:
+        task_id = str(raw or "")
+        if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.:-]{0,63}", task_id):
+            raise ValueError("taskId must be a portable identifier of 1 to 64 characters")
+        return task_id
+
+    @staticmethod
+    def _task_key(cwd: str, task_id: str) -> str:
+        return hashlib.sha256(f"{cwd}\0{task_id}".encode("utf-8")).hexdigest()
+
+    def _prepare_state_dir(self) -> None:
+        self.state_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
+        os.chmod(self.state_dir, 0o700)
+
+    @contextmanager
+    def _guard_lock(self) -> Iterator[None]:
+        self._prepare_state_dir()
+        descriptor = os.open(self.guard_lock_path, os.O_RDWR | os.O_CREAT, 0o600)
+        try:
+            os.fchmod(descriptor, 0o600)
+            fcntl.flock(descriptor, fcntl.LOCK_EX)
+            yield
+        finally:
+            fcntl.flock(descriptor, fcntl.LOCK_UN)
+            os.close(descriptor)
+
+    @staticmethod
+    def _new_guard(now: float) -> dict[str, Any]:
+        return {
+            "version": 1,
+            "windowStartedAt": now,
+            "calls": 0,
+            "allocatedUSD": 0.0,
+            "actualUSD": 0.0,
+            "chargedUSD": 0.0,
+            "unreportedUSD": 0.0,
+            "providerTurns": 0,
+            "reservations": {},
+            "tasks": {},
+            "blockedUntil": 0.0,
+            "lastUsage": None,
+        }
+
+    def _load_guard_unlocked(self, now: float) -> dict[str, Any]:
+        if not self.guard_path.is_file():
+            return self._new_guard(now)
+        try:
+            if stat.S_IMODE(self.guard_path.stat().st_mode) & 0o077:
+                raise RuntimeError("Claude worker usage guard permissions are not private")
+            record = json.loads(self.guard_path.read_text(encoding="utf-8"))
+        except json.JSONDecodeError as exc:
+            raise RuntimeError("Claude worker usage guard is invalid") from exc
+        except OSError as exc:
+            raise RuntimeError("Claude worker usage guard cannot be read") from exc
+        if not isinstance(record, dict) or record.get("version") != 1:
+            raise RuntimeError("Claude worker usage guard is invalid")
+        started = record.get("windowStartedAt")
+        if not isinstance(started, (int, float)) or now - started >= self.guard_window:
+            fresh = self._new_guard(now)
+            blocked_until = record.get("blockedUntil", 0.0)
+            if isinstance(blocked_until, (int, float)) and blocked_until > now:
+                fresh["blockedUntil"] = blocked_until
+            return fresh
+        if not isinstance(record.get("tasks"), dict):
+            raise RuntimeError("Claude worker usage guard is invalid")
+        if not isinstance(record.get("reservations", {}), dict):
+            raise RuntimeError("Claude worker usage guard reservations are invalid")
+        record.setdefault("chargedUSD", float(record.get("actualUSD", 0.0)))
+        record.setdefault("unreportedUSD", 0.0)
+        record.setdefault("providerTurns", 0)
+        record.setdefault("reservations", {})
+        for reservation_id, reservation in list(record["reservations"].items()):
+            created_at = reservation.get("createdAt") if isinstance(reservation, dict) else None
+            if not isinstance(created_at, (int, float)) or now - created_at >= self.reservation_ttl:
+                if isinstance(reservation, dict):
+                    budget = float(reservation.get("budgetUSD", 0.0))
+                    turns = int(reservation.get("maxTurns", 0))
+                    record["chargedUSD"] = round(float(record["chargedUSD"]) + budget, 6)
+                    record["unreportedUSD"] = round(
+                        float(record["unreportedUSD"]) + budget, 6
+                    )
+                    record["providerTurns"] = int(record["providerTurns"]) + turns
+                record["reservations"].pop(reservation_id, None)
+        return record
+
+    def _write_guard_unlocked(self, record: dict[str, Any]) -> None:
+        self._prepare_state_dir()
+        descriptor, temporary = tempfile.mkstemp(prefix=".usage-guard-", dir=self.state_dir)
+        try:
+            os.fchmod(descriptor, 0o600)
+            with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+                json.dump(record, handle, separators=(",", ":"))
+                handle.write("\n")
+            os.replace(temporary, self.guard_path)
+            os.chmod(self.guard_path, 0o600)
+        finally:
+            try:
+                os.unlink(temporary)
+            except FileNotFoundError:
+                pass
+
+    @staticmethod
+    def _blocked(reason: str, blocked_until: float = 0.0) -> dict[str, Any]:
+        messages = {
+            "provider_usage_limit": "Claude provider usage is exhausted; no model call was started.",
+            "task_call_limit": "This task has reached its Claude call limit.",
+            "window_call_limit": "The rolling Claude call limit has been reached.",
+            "window_turn_limit": "The rolling Claude provider-turn limit has been reached.",
+            "window_budget": "The rolling Claude charged-usage limit has been reached.",
+        }
+        return {
+            "status": "blocked",
+            "reason": reason,
+            "retryable": False,
+            "blockedUntil": blocked_until,
+            "result": messages[reason],
+        }
+
+    @staticmethod
+    def _reservation_totals(record: dict[str, Any]) -> tuple[float, int]:
+        budget = 0.0
+        turns = 0
+        for reservation in record.get("reservations", {}).values():
+            if not isinstance(reservation, dict):
+                continue
+            budget += float(reservation.get("budgetUSD", 0.0))
+            turns += int(reservation.get("maxTurns", 0))
+        return budget, turns
+
+    def _reserve_call(
+        self,
+        task_key: str,
+        budget: float,
+        max_turns: int,
+        task_calls: int,
+    ) -> tuple[str | None, dict[str, Any] | None]:
+        now = time.time()
+        reservation_id = hashlib.sha256(
+            f"{os.getpid()}:{threading.get_ident()}:{time.time_ns()}".encode("utf-8")
+        ).hexdigest()
+        with self._guard_lock():
+            record = self._load_guard_unlocked(now)
+            blocked_until = record.get("blockedUntil", 0.0)
+            if isinstance(blocked_until, (int, float)) and blocked_until > now:
+                return None, self._blocked("provider_usage_limit", float(blocked_until))
+            tasks = record["tasks"]
+            task = tasks.get(
+                task_key,
+                {"calls": 0, "limit": task_calls, "allocatedUSD": 0.0, "actualUSD": 0.0},
+            )
+            limit = int(task.get("limit", task_calls))
+            if int(task.get("calls", 0)) >= limit:
+                return None, self._blocked("task_call_limit")
+            if int(record.get("calls", 0)) >= self.guard_window_calls:
+                return None, self._blocked("window_call_limit")
+            reserved_budget, reserved_turns = self._reservation_totals(record)
+            if int(record.get("providerTurns", 0)) + reserved_turns + max_turns > self.guard_window_turns:
+                return None, self._blocked("window_turn_limit")
+            if float(record.get("chargedUSD", 0.0)) + reserved_budget + budget > self.guard_window_budget:
+                return None, self._blocked("window_budget")
+            record["calls"] = int(record.get("calls", 0)) + 1
+            record["allocatedUSD"] = round(float(record.get("allocatedUSD", 0.0)) + budget, 6)
+            task["calls"] = int(task.get("calls", 0)) + 1
+            task["limit"] = limit
+            task["allocatedUSD"] = round(float(task.get("allocatedUSD", 0.0)) + budget, 6)
+            tasks[task_key] = task
+            record["reservations"][reservation_id] = {
+                "budgetUSD": budget,
+                "maxTurns": max_turns,
+                "createdAt": now,
+            }
+            self._write_guard_unlocked(record)
+        return reservation_id, None
+
+    def _finalize_call(
+        self,
+        reservation_id: str,
+        task_key: str,
+        usage: dict[str, int | float],
+        provider_turns: int,
+        unknown_usage: bool = False,
+    ) -> None:
+        cost = usage.get("costUSD", 0.0)
+        if not isinstance(cost, (int, float)) or isinstance(cost, bool) or cost < 0:
+            cost = 0.0
+        now = time.time()
+        with self._guard_lock():
+            record = self._load_guard_unlocked(now)
+            reservation = record["reservations"].pop(reservation_id, None)
+            if not isinstance(reservation, dict):
+                return
+            if unknown_usage:
+                cost = float(reservation.get("budgetUSD", 0.0))
+                provider_turns = int(reservation.get("maxTurns", 0))
+                record["unreportedUSD"] = round(
+                    float(record.get("unreportedUSD", 0.0)) + cost, 6
+                )
+            else:
+                record["actualUSD"] = round(float(record.get("actualUSD", 0.0)) + cost, 6)
+            record["chargedUSD"] = round(float(record.get("chargedUSD", 0.0)) + cost, 6)
+            record["providerTurns"] = int(record.get("providerTurns", 0)) + max(
+                0, provider_turns
+            )
+            task = record["tasks"].get(
+                task_key, {"calls": 0, "allocatedUSD": 0.0, "actualUSD": 0.0}
+            )
+            if not unknown_usage:
+                task["actualUSD"] = round(float(task.get("actualUSD", 0.0)) + cost, 6)
+            record["tasks"][task_key] = task
+            if usage:
+                record["lastUsage"] = {
+                    name: value
+                    for name in (
+                        "inputTokens",
+                        "outputTokens",
+                        "cacheReadInputTokens",
+                        "cacheCreationInputTokens",
+                        "costUSD",
+                    )
+                    if isinstance((value := usage.get(name)), (int, float))
+                    and not isinstance(value, bool)
+                    and value >= 0
+                }
+                record["lastUsage"]["providerTurns"] = max(0, provider_turns)
+                record["lastUsage"]["recordedAt"] = now
+            self._write_guard_unlocked(record)
+
+    def _trip_usage_breaker(self) -> float:
+        now = time.time()
+        blocked_until = now + self.usage_cooldown
+        with self._guard_lock():
+            record = self._load_guard_unlocked(now)
+            record["blockedUntil"] = blocked_until
+            self._write_guard_unlocked(record)
+        return blocked_until
+
+    def _active_path(self, request_id: Any, attempt: int) -> Path:
+        identity = f"{os.getpid()}:{self._request_key(request_id)}:{attempt}"
+        digest = hashlib.sha256(identity.encode("utf-8")).hexdigest()
+        return self.active_dir / f"{digest}.json"
+
+    def _prepare_active_dir(self) -> None:
+        self.active_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
+        os.chmod(self.state_dir, 0o700)
+        os.chmod(self.active_dir, 0o700)
+
+    @staticmethod
+    def _safe_tool_name(raw: Any) -> str:
+        name = str(raw or "")
+        return name if re.fullmatch(r"[A-Za-z0-9_.:-]{1,80}", name) else "tool"
+
+    @staticmethod
+    def _safe_target(tool: str, raw: Any) -> str:
+        if not isinstance(raw, dict):
+            return ""
+        if tool.lower() in {"webfetch", "websearch"}:
+            value = raw.get("url")
+            if isinstance(value, str):
+                try:
+                    return urlsplit(value).hostname or ""
+                except ValueError:
+                    return ""
+        for key in ("file_path", "path"):
+            value = raw.get(key)
+            if isinstance(value, str) and value:
+                return Path(value).name[:120]
+        return ""
+
+    def _write_active(self, path: Path, state: dict[str, Any]) -> None:
+        self._prepare_active_dir()
+        fd, temporary = tempfile.mkstemp(prefix=".active-", dir=self.active_dir)
+        try:
+            os.fchmod(fd, 0o600)
+            with os.fdopen(fd, "w", encoding="utf-8") as handle:
+                json.dump(state, handle, separators=(",", ":"))
+                handle.write("\n")
+            os.replace(temporary, path)
+            os.chmod(path, 0o600)
+        finally:
+            try:
+                os.unlink(temporary)
+            except FileNotFoundError:
+                pass
+
+    @staticmethod
+    def _progress_message(state: dict[str, Any]) -> str:
+        parts = [
+            f"Claude {state['model']} {state['role']}",
+            str(state["phase"]),
+        ]
+        if state.get("tool"):
+            parts.append(str(state["tool"]))
+        if state.get("target"):
+            parts.append(str(state["target"]))
+        return " · ".join(parts)
+
+    def _record_event(
+        self,
+        path: Path,
+        state: dict[str, Any],
+        event: dict[str, Any] | None,
+        progress: Callable[[int, str], None] | None,
+        seen_messages: set[str],
+    ) -> None:
+        state["eventCount"] += 1
+        state["updatedAt"] = time.time()
+        state["tool"] = ""
+        state["target"] = ""
+        if event is None:
+            state["phase"] = "receiving output"
+            state["activity"] = "invalid stream event"
+        elif event.get("type") == "system" and event.get("subtype") == "init":
+            state["phase"] = "initializing"
+            state["activity"] = "Claude session initialized"
+        elif event.get("type") == "assistant":
+            message = event.get("message")
+            if isinstance(message, dict):
+                message_id = str(message.get("id") or f"event:{state['eventCount']}")
+                if message_id not in seen_messages:
+                    seen_messages.add(message_id)
+                    state["providerTurns"] += 1
+                    usage = message.get("usage")
+                    if isinstance(usage, dict):
+                        for target, source in (
+                            ("inputTokens", "input_tokens"),
+                            ("outputTokens", "output_tokens"),
+                            ("cacheReadInputTokens", "cache_read_input_tokens"),
+                            ("cacheCreationInputTokens", "cache_creation_input_tokens"),
+                        ):
+                            value = usage.get(source, usage.get(target))
+                            if isinstance(value, int) and not isinstance(value, bool) and value >= 0:
+                                state[target] += value
+            content = message.get("content", []) if isinstance(message, dict) else []
+            if not isinstance(content, list):
+                content = []
+            tool_block = next(
+                (
+                    block
+                    for block in content
+                    if isinstance(block, dict) and block.get("type") == "tool_use"
+                ),
+                None,
+            )
+            if tool_block is None:
+                state["phase"] = "reasoning"
+                state["activity"] = "model response"
+            else:
+                tool = self._safe_tool_name(tool_block.get("name"))
+                target = self._safe_target(tool, tool_block.get("input"))
+                state["phase"] = "using tool"
+                state["activity"] = "tool call"
+                state["tool"] = tool
+                state["target"] = target
+        elif event.get("type") == "user":
+            state["phase"] = "processing result"
+            state["activity"] = "tool result received"
+        elif event.get("type") == "result":
+            state["phase"] = "completing"
+            state["activity"] = "final result received"
+        else:
+            state["phase"] = "working"
+            state["activity"] = "stream event"
+        self._write_active(path, state)
+        if progress is not None:
+            progress(state["eventCount"], self._progress_message(state))
+
+    @staticmethod
+    def _checkpoint_text(raw: Any) -> str:
+        if raw is None or raw == "":
+            return ""
+        if not isinstance(raw, str):
+            raise ValueError("checkpoint must be a string")
+        if len(raw) > 4000:
+            raise ValueError("checkpoint exceeds 4000 characters")
+        lines = [line.strip() for line in raw.splitlines() if line.strip()]
+        if len(lines) > 5:
+            raise ValueError("checkpoint must contain no more than five distilled bullets")
+        return "\n".join(lines)
+
+    def _checkpoint_path(self, session_id: str) -> Path:
+        digest = hashlib.sha256(session_id.encode("utf-8")).hexdigest()
+        return self.checkpoint_dir / f"{digest}.json"
+
+    def _prepare_checkpoint_dir(self) -> None:
+        self.checkpoint_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
+        os.chmod(self.state_dir, 0o700)
+        os.chmod(self.checkpoint_dir, 0o700)
+
+    def _prune_checkpoints(self, now: float) -> None:
+        cutoff = now - self.checkpoint_ttl
+        for path in self.checkpoint_dir.glob("*.json"):
+            try:
+                if path.stat().st_mtime <= cutoff:
+                    path.unlink()
+            except FileNotFoundError:
+                continue
+
+    def _store_checkpoint(
+        self, session_id: str, role: str, cwd: str, task_key: str, checkpoint: str
+    ) -> None:
+        if not checkpoint:
+            return
+        now = time.time()
+        self._prepare_checkpoint_dir()
+        self._prune_checkpoints(now)
+        record = {
+            "version": 2,
+            "sessionId": session_id,
+            "role": role,
+            "cwd": cwd,
+            "taskKey": task_key,
+            "checkpoint": checkpoint,
+            "createdAt": now,
+            "updatedAt": now,
+        }
+        fd, temporary = tempfile.mkstemp(prefix=".checkpoint-", dir=self.checkpoint_dir)
+        try:
+            os.fchmod(fd, 0o600)
+            with os.fdopen(fd, "w", encoding="utf-8") as handle:
+                json.dump(record, handle, separators=(",", ":"))
+                handle.write("\n")
+            os.replace(temporary, self._checkpoint_path(session_id))
+            os.chmod(self._checkpoint_path(session_id), 0o600)
+        finally:
+            try:
+                os.unlink(temporary)
+            except FileNotFoundError:
+                pass
+
+    def _load_checkpoint(self, session_id: str, cwd: str) -> dict[str, Any]:
+        path = self._checkpoint_path(session_id)
+        if not path.is_file():
+            raise ValueError(
+                "sessionId is not owned by this worker process and no recovery checkpoint exists; "
+                "start a fresh Claude session"
+            )
+        try:
+            modes = (self.state_dir.stat(), self.checkpoint_dir.stat(), path.stat())
+        except OSError as exc:
+            raise ValueError(
+                "recovery checkpoint permissions cannot be verified; start a fresh Claude session"
+            ) from exc
+        if any(stat.S_IMODE(item.st_mode) & 0o077 for item in modes):
+            raise ValueError(
+                "recovery checkpoint permissions are not private; start a fresh Claude session"
+            )
+        try:
+            record = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            raise ValueError("recovery checkpoint is invalid; start a fresh Claude session") from exc
+        now = time.time()
+        updated = record.get("updatedAt") if isinstance(record, dict) else None
+        if not isinstance(updated, (int, float)) or now - updated >= self.checkpoint_ttl:
+            path.unlink(missing_ok=True)
+            raise ValueError("recovery checkpoint expired; start a fresh Claude session")
+        if (
+            record.get("version") not in (1, 2)
+            or record.get("sessionId") != session_id
+            or record.get("role") not in ROLE_CONFIG
+        ):
+            raise ValueError("recovery checkpoint is invalid; start a fresh Claude session")
+        checkpoint = self._checkpoint_text(record.get("checkpoint"))
+        if not checkpoint:
+            raise ValueError("recovery checkpoint is empty; start a fresh Claude session")
+        if record.get("cwd") != cwd:
+            raise ValueError("recovery checkpoint working directory does not match this request")
+        task_key = record.get("taskKey")
+        if record.get("version") == 1:
+            task_key = self._task_key(cwd, f"legacy:{session_id}")
+        if not isinstance(task_key, str) or not re.fullmatch(r"[0-9a-f]{64}", task_key):
+            raise ValueError("recovery checkpoint task identity is invalid")
+        record["taskKey"] = task_key
+        record["checkpoint"] = checkpoint
+        return record
+
+    @staticmethod
+    def _budget_limit_reached(message: str) -> bool:
+        normalized = " ".join(message.lower().split())
+        return "budget" in normalized and any(
+            marker in normalized for marker in ("reached", "exceeded", "exhausted")
+        )
+
+    @staticmethod
+    def _budget(role: str, config: dict[str, str]) -> str:
+        prefix = f"CLAUDE_WORKER_{role.upper().replace('-', '_')}"
+        return os.environ.get(f"{prefix}_BUDGET_USD", config["budget"])
+
+    @staticmethod
+    def _usage_limit_message(event: dict[str, Any]) -> bool:
+        chunks: list[str] = []
+        if event.get("type") == "assistant" and isinstance(event.get("message"), dict):
+            content = event["message"].get("content", [])
+            if isinstance(content, list):
+                chunks.extend(
+                    str(block.get("text") or "")
+                    for block in content
+                    if isinstance(block, dict) and block.get("type") == "text"
+                )
+        if event.get("type") == "result" or "result" in event:
+            chunks.append(str(event.get("result") or ""))
+        normalized = " ".join(" ".join(chunks).lower().split())
+        limit = any(
+            marker in normalized
+            for marker in ("session limit", "usage limit", "rate limit")
+        )
+        exhausted = any(
+            marker in normalized
+            for marker in ("hit", "reached", "exceeded", "exhausted")
+        )
+        return limit and exhausted
+
+    @staticmethod
+    def _usage(payload: dict[str, Any]) -> tuple[dict[str, int | float], list[str]]:
+        model_usage = payload.get("modelUsage") or {}
+        models = sorted(model_usage) if isinstance(model_usage, dict) else []
+        usage: dict[str, int | float] = {}
+        if isinstance(model_usage, dict):
+            for model_values in model_usage.values():
+                if not isinstance(model_values, dict):
+                    continue
+                for name in (
+                    "inputTokens",
+                    "outputTokens",
+                    "cacheReadInputTokens",
+                    "cacheCreationInputTokens",
+                    "costUSD",
+                ):
+                    value = model_values.get(name)
+                    if isinstance(value, (int, float)) and not isinstance(value, bool):
+                        usage[name] = usage.get(name, 0) + value
+        return usage, models
+
+    def _command(
+        self,
+        role: str,
+        config: dict[str, str],
+        prompt: str,
+        budget: str,
+    ) -> list[str]:
+        profile = self._profile(role)
+        command = [self.claude_bin, "-p"]
+        command.extend(
+            [
+                "--safe-mode",
+                "--system-prompt",
+                SYSTEM_PROMPT,
+                "--model",
+                config["model"],
+                "--effort",
+                config["effort"],
+                "--permission-mode",
+                "dontAsk",
+                "--tools",
+                str(profile["tools"]),
+                "--max-turns",
+                str(profile["maxTurns"]),
+                "--max-budget-usd",
+                budget,
+                "--strict-mcp-config",
+                "--mcp-config",
+                '{"mcpServers":{}}',
+                "--verbose",
+                "--output-format",
+                "stream-json",
+                prompt,
+            ]
+        )
+        return command
+
+    def _run_once(
+        self,
+        *,
+        role: str,
+        config: dict[str, str],
+        prompt: str,
+        cwd: Any,
+        request_id: Any,
+        budget: str,
+        timeout: float,
+        attempt: int,
+        progress: Callable[[int, str], None] | None,
+    ) -> dict[str, Any]:
+        started = time.monotonic()
+        started_at = time.time()
+        directory = self._directory(cwd)
+        command = self._command(
+            role,
+            config,
+            f"ROLE: {role}\n\n{prompt}",
+            budget,
+        )
+        process = subprocess.Popen(
+            command,
+            cwd=directory,
+            env=os.environ.copy(),
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            bufsize=1,
+            start_new_session=True,
+        )
+        key = self._request_key(request_id)
+        active_path = self._active_path(request_id, attempt)
+        active_state: dict[str, Any] = {
+            "version": 1,
+            "status": "active",
+            "serverPid": os.getpid(),
+            "pid": process.pid,
+            "role": role,
+            "model": config["model"],
+            "attempt": attempt,
+            "budgetUSD": float(budget),
+            "repository": Path(directory).name,
+            "phase": "starting",
+            "activity": "launching Claude",
+            "tool": "",
+            "target": "",
+            "eventCount": 0,
+            "providerTurns": 0,
+            "inputTokens": 0,
+            "outputTokens": 0,
+            "cacheReadInputTokens": 0,
+            "cacheCreationInputTokens": 0,
+            "startedAt": started_at,
+            "updatedAt": started_at,
+        }
+        self._write_active(active_path, active_state)
+        if progress is not None:
+            progress(0, self._progress_message(active_state))
+        with self.lock:
+            self.processes[key] = process
+            cancel_immediately = key in self.cancelled
+        if cancel_immediately:
+            self._stop_process(process)
+
+        lines: queue.Queue[str | None] = queue.Queue()
+        stderr_lines: list[str] = []
+
+        def read_stdout() -> None:
+            assert process.stdout is not None
+            try:
+                for line in process.stdout:
+                    lines.put(line)
+            finally:
+                lines.put(None)
+
+        def read_stderr() -> None:
+            assert process.stderr is not None
+            for line in process.stderr:
+                stderr_lines.append(line)
+
+        stdout_thread = threading.Thread(target=read_stdout, daemon=True)
+        stderr_thread = threading.Thread(target=read_stderr, daemon=True)
+        stdout_thread.start()
+        stderr_thread.start()
+        payload: dict[str, Any] | None = None
+        seen_messages: set[str] = set()
+        try:
+            deadline = started + timeout
+            while True:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    self._stop_process(process)
+                    raise subprocess.TimeoutExpired(command, timeout)
+                try:
+                    line = lines.get(timeout=min(0.2, remaining))
+                except queue.Empty:
+                    continue
+                if line is None:
+                    break
+                try:
+                    decoded = json.loads(line)
+                except json.JSONDecodeError:
+                    self._record_event(
+                        active_path, active_state, None, progress, seen_messages
+                    )
+                    continue
+                if not isinstance(decoded, dict):
+                    self._record_event(
+                        active_path, active_state, None, progress, seen_messages
+                    )
+                    continue
+                if self._usage_limit_message(decoded):
+                    raise ProviderUsageLimited(
+                        "Claude provider usage limit reached",
+                        self._trip_usage_breaker(),
+                        max(1, int(active_state["providerTurns"])),
+                    )
+                if decoded.get("type") == "result" or (
+                    "result" in decoded
+                    and ("session_id" in decoded or "is_error" in decoded)
+                ):
+                    payload = decoded
+                self._record_event(
+                    active_path, active_state, decoded, progress, seen_messages
+                )
+            process.wait(timeout=max(0.1, deadline - time.monotonic()))
+        except Exception:
+            self._stop_process(process)
+            raise
+        finally:
+            with self.lock:
+                self.processes.pop(key, None)
+            active_path.unlink(missing_ok=True)
+            stdout_thread.join(timeout=1)
+            stderr_thread.join(timeout=1)
+        elapsed = round(time.monotonic() - started, 3)
+        if process.returncode != 0:
+            detail = "".join(stderr_lines).strip()[-2000:]
+            if not detail and payload is not None:
+                detail = str(payload.get("result") or "Claude process failed")[-2000:]
+            if self._usage_limit_message({"type": "result", "result": detail}):
+                raise ProviderUsageLimited(
+                    "Claude provider usage limit reached",
+                    self._trip_usage_breaker(),
+                    max(1, int(active_state["providerTurns"])),
+                )
+            if self._budget_limit_reached(detail):
+                usage, _ = self._usage(payload or {})
+                raise BudgetLimitReached(
+                    detail,
+                    usage,
+                    usage_complete=payload is not None and isinstance(payload.get("modelUsage"), dict),
+                    provider_turns=int(active_state["providerTurns"]),
+                )
+            raise RuntimeError(f"Claude exited {process.returncode}: {detail}")
+        if payload is None:
+            raise RuntimeError("Claude returned invalid JSON")
+        if payload.get("is_error"):
+            detail = str(payload.get("result") or "Claude reported an error")
+            if self._usage_limit_message(payload):
+                raise ProviderUsageLimited(
+                    "Claude provider usage limit reached",
+                    self._trip_usage_breaker(),
+                    max(1, int(active_state["providerTurns"])),
+                )
+            if self._budget_limit_reached(detail):
+                usage, _ = self._usage(payload)
+                raise BudgetLimitReached(
+                    detail,
+                    usage,
+                    usage_complete=isinstance(payload.get("modelUsage"), dict),
+                    provider_turns=int(active_state["providerTurns"]),
+                )
+            raise RuntimeError(detail)
+
+        returned_session = str(payload.get("session_id") or "")
+        if not returned_session:
+            raise RuntimeError("Claude response did not include a session_id")
+        usage, actual_models = self._usage(payload)
+        return {
+            "status": "ok",
+            "role": role,
+            "model": actual_models[0] if actual_models else config["model"],
+            "sessionId": returned_session,
+            "elapsed": elapsed,
+            "usage": usage,
+            "providerTurns": int(active_state["providerTurns"]),
+            "models": actual_models,
+            "result": str(payload.get("result") or ""),
+        }
+
+    def _run(
+        self,
+        *,
+        role: str,
+        prompt: str,
+        cwd: Any,
+        request_id: Any,
+        progress: Callable[[int, str], None] | None,
+    ) -> dict[str, Any]:
+        config = ROLE_CONFIG[role]
+        heavy = role in HEAVY_ROLES
+        timeout = self.heavy_timeout if heavy else self.timeout
+        started = time.monotonic()
+        budget = self._budget(role, config)
+        result = self._run_once(
+            role=role,
+            config=config,
+            prompt=prompt,
+            cwd=cwd,
+            request_id=request_id,
+            budget=budget,
+            timeout=timeout,
+            attempt=1,
+            progress=progress,
+        )
+        result["elapsed"] = round(time.monotonic() - started, 3)
+        result["attempts"] = 1
+        result["retryReason"] = None
+        result["attemptBudgetsUSD"] = [float(budget)]
+        result["cumulativeUsage"] = result["usage"]
+        result["cumulativeUsageComplete"] = True
+        return result
+
+    def _guarded_run(
+        self,
+        *,
+        role: str,
+        task_key: str,
+        prompt: str,
+        cwd: str,
+        request_id: Any,
+        progress: Callable[[int, str], None] | None,
+    ) -> dict[str, Any]:
+        budget = float(self._budget(role, ROLE_CONFIG[role]))
+        profile = self._profile(role)
+        reservation_id, blocked = self._reserve_call(
+            task_key,
+            budget,
+            int(profile["maxTurns"]),
+            int(profile["taskCalls"]),
+        )
+        if blocked is not None:
+            return blocked
+        assert reservation_id is not None
+        try:
+            result = self._run(
+                role=role,
+                prompt=prompt,
+                cwd=cwd,
+                request_id=request_id,
+                progress=progress,
+            )
+        except ProviderUsageLimited as exc:
+            self._finalize_call(
+                reservation_id, task_key, {}, exc.provider_turns, unknown_usage=False
+            )
+            return self._blocked("provider_usage_limit", exc.blocked_until)
+        except BudgetLimitReached as exc:
+            self._finalize_call(
+                reservation_id,
+                task_key,
+                exc.usage,
+                exc.provider_turns,
+                unknown_usage=not exc.usage_complete,
+            )
+            raise
+        except Exception:
+            self._finalize_call(
+                reservation_id,
+                task_key,
+                {},
+                int(profile["maxTurns"]),
+                unknown_usage=True,
+            )
+            raise
+        self._finalize_call(
+            reservation_id,
+            task_key,
+            result["usage"],
+            int(result["providerTurns"]),
+            unknown_usage=False,
+        )
+        return result
+
+    def call(
+        self,
+        request_id: Any,
+        name: str,
+        arguments: dict[str, Any],
+        progress: Callable[[int, str], None] | None = None,
+    ) -> dict[str, Any]:
+        if name == "claude":
+            role = str(arguments.get("role") or "")
+            if role not in ROLE_CONFIG:
+                raise ValueError(f"unsupported role: {role}")
+            directory = self._directory(arguments.get("cwd"))
+            task_id = self._task_id(arguments.get("taskId"))
+            task_key = self._task_key(directory, task_id)
+            checkpoint = self._checkpoint_text(arguments.get("checkpoint"))
+            result = self._guarded_run(
+                role=role,
+                task_key=task_key,
+                prompt=str(arguments.get("prompt") or ""),
+                cwd=directory,
+                request_id=request_id,
+                progress=progress,
+            )
+            if result.get("status") == "blocked":
+                return result
+            with self.lock:
+                self.sessions[result["sessionId"]] = {
+                    "role": role,
+                    "taskKey": task_key,
+                    "cwd": directory,
+                    "checkpoint": checkpoint,
+                }
+            self._store_checkpoint(
+                result["sessionId"], role, directory, task_key, checkpoint
+            )
+            result["recoveredFromCheckpoint"] = False
+            result["freshReview"] = False
+            return result
+        if name == "claude-reply":
+            session_id = str(arguments.get("sessionId") or "")
+            directory = self._directory(arguments.get("cwd"))
+            with self.lock:
+                config = self.sessions.get(session_id)
+            if config is None:
+                checkpoint = self._load_checkpoint(session_id, directory)
+                role = REVIEW_ROLE[checkpoint["role"]]
+                task_key = checkpoint["taskKey"]
+                checkpoint_text = checkpoint["checkpoint"]
+                recovered = True
+            else:
+                if config["cwd"] != directory:
+                    raise ValueError("Claude session working directory does not match this request")
+                role = REVIEW_ROLE[config["role"]]
+                task_key = config["taskKey"]
+                checkpoint_text = config["checkpoint"]
+                recovered = False
+            prompt = str(arguments.get("prompt") or "")
+            if checkpoint_text:
+                prompt = (
+                    "RECOVERY CHECKPOINT (distilled context; do not infer missing transcript):\n"
+                    f"{checkpoint_text}\n\nNEW EVIDENCE AND REVIEW REQUEST:\n{prompt}"
+                )
+            result = self._guarded_run(
+                role=role,
+                task_key=task_key,
+                prompt=prompt,
+                cwd=directory,
+                request_id=request_id,
+                progress=progress,
+            )
+            if result.get("status") == "blocked":
+                return result
+            result["recoveredFromCheckpoint"] = recovered
+            result["freshReview"] = True
+            return result
+        raise ValueError(f"unknown tool: {name}")
+
+
+def response(request_id: Any, result: dict[str, Any]) -> None:
+    with OUTPUT_LOCK:
+        print(json.dumps({"jsonrpc": "2.0", "id": request_id, "result": result}), flush=True)
+
+
+def notification(method: str, params: dict[str, Any]) -> None:
+    with OUTPUT_LOCK:
+        print(json.dumps({"jsonrpc": "2.0", "method": method, "params": params}), flush=True)
+
+
+def error_response(request_id: Any, code: int, message: str) -> None:
+    with OUTPUT_LOCK:
+        print(
+            json.dumps(
+                {"jsonrpc": "2.0", "id": request_id, "error": {"code": code, "message": message}}
+            ),
+            flush=True,
+        )
+
+
+def resolve_claude(explicit: str | None) -> str:
+    candidate = explicit or os.environ.get("CLAUDE_BIN") or shutil.which("claude")
+    if not candidate:
+        raise SystemExit("claude-worker-mcp: Claude Code executable not found")
+    return str(Path(candidate).expanduser().resolve())
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--claude-bin")
+    args = parser.parse_args()
+    worker = ClaudeWorker(resolve_claude(args.claude_bin))
+    calls: list[threading.Thread] = []
+
+    def handle_call(request_id: Any, params: dict[str, Any]) -> None:
+        try:
+            meta = params.get("_meta") if isinstance(params.get("_meta"), dict) else {}
+            progress_token = meta.get("progressToken")
+            progress = None
+            if progress_token is not None:
+                progress = lambda count, message: notification(
+                    "notifications/progress",
+                    {
+                        "progressToken": progress_token,
+                        "progress": count,
+                        "message": message,
+                    },
+                )
+            result = worker.call(
+                request_id,
+                str(params.get("name") or ""),
+                params.get("arguments") or {},
+                progress,
+            )
+            response(
+                request_id,
+                {
+                    "content": [{"type": "text", "text": json.dumps(result, ensure_ascii=False)}],
+                    "structuredContent": result,
+                },
+            )
+        except (ValueError, RuntimeError, subprocess.TimeoutExpired) as exc:
+            error_response(request_id, -32000, str(exc))
+        finally:
+            worker.finish(request_id)
+
+    try:
+        for line in sys.stdin:
+            try:
+                request = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            request_id = request.get("id")
+            method = request.get("method")
+            if method == "notifications/cancelled":
+                params = request.get("params") or {}
+                worker.cancel(params.get("requestId"))
+                continue
+            if request_id is None:
+                continue
+            if method == "initialize":
+                response(
+                    request_id,
+                    {
+                        "protocolVersion": "2025-06-18",
+                        "capabilities": {"tools": {}},
+                        "serverInfo": {"name": "harness-claude-worker", "version": "1"},
+                    },
+                )
+            elif method == "tools/list":
+                response(request_id, {"tools": tool_schema()})
+            elif method == "tools/call":
+                params = request.get("params") or {}
+                worker.prepare(request_id)
+                thread = threading.Thread(
+                    target=handle_call,
+                    args=(request_id, params),
+                    daemon=True,
+                )
+                calls.append(thread)
+                thread.start()
+            else:
+                error_response(request_id, -32601, f"method not found: {method}")
+    finally:
+        worker.cancel_all()
+        for thread in calls:
+            thread.join(timeout=2)
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

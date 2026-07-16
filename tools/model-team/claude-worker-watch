@@ -1,0 +1,278 @@
+#!/usr/bin/env python3
+
+# harness-workflow: managed Codex Claude-worker observer
+
+"""Stable terminal view of sanitized Codex Claude-worker activity."""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+from pathlib import Path
+import re
+import sys
+import time
+from typing import Any
+
+
+def default_state_dir() -> Path:
+    override = os.environ.get("CLAUDE_WORKER_STATE_DIR")
+    if override:
+        return Path(override).expanduser()
+    state_home = Path(os.environ.get("XDG_STATE_HOME", Path.home() / ".local/state"))
+    return state_home / "harness-workflow/claude-worker"
+
+
+def process_alive(raw: Any) -> bool:
+    if not isinstance(raw, int) or isinstance(raw, bool) or raw <= 0:
+        return False
+    try:
+        os.kill(raw, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
+
+
+def clean(raw: Any, limit: int = 120) -> str:
+    value = str(raw or "")[:limit]
+    return re.sub(r"[\x00-\x1f\x7f-\x9f]", "?", value)
+
+
+def read_record(path: Path, now: float) -> tuple[str, dict[str, Any]] | None:
+    try:
+        record = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    if not isinstance(record, dict) or record.get("version") != 1:
+        return None
+    started = record.get("startedAt")
+    updated = record.get("updatedAt")
+    if not isinstance(started, (int, float)) or not isinstance(updated, (int, float)):
+        return None
+    live = process_alive(record.get("serverPid")) and process_alive(record.get("pid"))
+    view = {
+        "pid": record.get("pid"),
+        "serverPid": record.get("serverPid"),
+        "role": clean(record.get("role"), 40),
+        "model": clean(record.get("model"), 60),
+        "attempt": record.get("attempt"),
+        "budgetUSD": record.get("budgetUSD"),
+        "repository": clean(record.get("repository")),
+        "phase": clean(record.get("phase"), 60),
+        "activity": clean(record.get("activity")),
+        "tool": clean(record.get("tool"), 80),
+        "target": clean(record.get("target")),
+        "eventCount": record.get("eventCount"),
+        "providerTurns": record.get("providerTurns", 0),
+        "inputTokens": record.get("inputTokens", 0),
+        "outputTokens": record.get("outputTokens", 0),
+        "cacheReadInputTokens": record.get("cacheReadInputTokens", 0),
+        "cacheCreationInputTokens": record.get("cacheCreationInputTokens", 0),
+        "elapsedSeconds": max(0, int(now - started)),
+        "lastActivitySeconds": max(0, int(now - updated)),
+    }
+    return ("active" if live else "stale", view)
+
+
+def read_guard(state_dir: Path, now: float) -> dict[str, Any] | None:
+    try:
+        record = json.loads((state_dir / "usage-guard.json").read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    if not isinstance(record, dict) or record.get("version") != 1:
+        return None
+    last_usage = record.get("lastUsage")
+    if not isinstance(last_usage, dict):
+        last_usage = {}
+    blocked_until = record.get("blockedUntil", 0.0)
+    if not isinstance(blocked_until, (int, float)):
+        blocked_until = 0.0
+    reservations = record.get("reservations")
+    if not isinstance(reservations, dict):
+        reservations = {}
+    reserved_usd = 0.0
+    reserved_turns = 0
+    for reservation in reservations.values():
+        if not isinstance(reservation, dict):
+            continue
+        budget = reservation.get("budgetUSD", 0.0)
+        turns = reservation.get("maxTurns", 0)
+        if isinstance(budget, (int, float)) and not isinstance(budget, bool):
+            reserved_usd += budget
+        if isinstance(turns, int) and not isinstance(turns, bool):
+            reserved_turns += turns
+    return {
+        "calls": record.get("calls", 0),
+        "maxCalls": int(os.environ.get("CLAUDE_WORKER_WINDOW_MAX_CALLS", "8")),
+        "providerTurns": record.get("providerTurns", 0),
+        "maxProviderTurns": int(os.environ.get("CLAUDE_WORKER_WINDOW_MAX_TURNS", "24")),
+        "reservedUSD": reserved_usd,
+        "reservedTurns": reserved_turns,
+        "allocatedUSD": record.get("allocatedUSD", 0.0),
+        "chargedUSD": record.get("chargedUSD", record.get("actualUSD", 0.0)),
+        "unreportedUSD": record.get("unreportedUSD", 0.0),
+        "maxChargedUSD": float(
+            os.environ.get("CLAUDE_WORKER_WINDOW_BUDGET_USD", "12.00")
+        ),
+        "actualUSD": record.get("actualUSD", 0.0),
+        "blockedUntil": blocked_until,
+        "blockedSeconds": max(0, int(blocked_until - now)),
+        "lastUsage": {
+            name: last_usage.get(name, 0)
+            for name in (
+                "inputTokens",
+                "outputTokens",
+                "cacheReadInputTokens",
+                "cacheCreationInputTokens",
+                "costUSD",
+                "recordedAt",
+            )
+        },
+    }
+
+
+def snapshot(state_dir: Path) -> dict[str, Any]:
+    now = time.time()
+    active: list[dict[str, Any]] = []
+    stale: list[dict[str, Any]] = []
+    active_dir = state_dir / "active"
+    if active_dir.is_dir():
+        for path in sorted(active_dir.glob("*.json")):
+            loaded = read_record(path, now)
+            if loaded is None:
+                continue
+            status, record = loaded
+            (active if status == "active" else stale).append(record)
+    status = "active" if active else "stale" if stale else "idle"
+    return {
+        "status": status,
+        "active": active,
+        "stale": stale,
+        "activeCount": len(active),
+        "staleCount": len(stale),
+        "guard": read_guard(state_dir, now),
+        "stateDir": str(state_dir),
+    }
+
+
+def duration(seconds: int) -> str:
+    minutes, seconds = divmod(seconds, 60)
+    hours, minutes = divmod(minutes, 60)
+    if hours:
+        return f"{hours:02d}:{minutes:02d}:{seconds:02d}"
+    return f"{minutes:02d}:{seconds:02d}"
+
+
+def model_label(model: str) -> str:
+    return {"fable": "Fable", "sonnet": "Sonnet"}.get(model, model or "unknown")
+
+
+def render(data: dict[str, Any]) -> str:
+    lines = ["  claude-worker watcher", "  " + "─" * 48]
+    status = str(data["status"]).upper()
+    if status == "ACTIVE":
+        count = data["activeCount"]
+        lines.append(f"  claude-worker  ACTIVE · {count} call{'s' if count != 1 else ''}")
+        for index, call in enumerate(data["active"], start=1):
+            prefix = f"call {index}" if count > 1 else "actor"
+            budget = call.get("budgetUSD")
+            budget_text = f"USD {budget:.2f}" if isinstance(budget, (int, float)) else "unknown"
+            lines.extend(
+                [
+                    f"  {prefix:<14}{model_label(call['model'])} · {call['role']} · "
+                    f"attempt {call['attempt']} · ceiling {budget_text}",
+                    f"  phase          {call['phase']}"
+                    + (f" · {call['tool']}" if call["tool"] else "")
+                    + (f" · {call['target']}" if call["target"] else ""),
+                    f"  runtime        {duration(call['elapsedSeconds'])} · "
+                    f"events {call['eventCount']} · last activity {call['lastActivitySeconds']}s ago",
+                    f"  provider       turns {call['providerTurns']} · tokens "
+                    f"{call['inputTokens']} in / {call['outputTokens']} out · "
+                    f"cache {call['cacheReadInputTokens']} read / "
+                    f"{call['cacheCreationInputTokens']} create",
+                    f"  repository     {call['repository']} · pid {call['pid']}",
+                ]
+            )
+    elif status == "STALE":
+        lines.append(
+            f"  claude-worker  STALE · {data['staleCount']} record"
+            f"{'s' if data['staleCount'] != 1 else ''} without a live process"
+        )
+    else:
+        lines.append("  claude-worker  IDLE · no active calls")
+    guard = data.get("guard")
+    if isinstance(guard, dict):
+        charged = guard.get("chargedUSD")
+        reserved = guard.get("reservedUSD")
+        maximum = guard.get("maxChargedUSD")
+        actual = guard.get("actualUSD")
+        if all(isinstance(value, (int, float)) for value in (charged, reserved, maximum, actual)):
+            lines.append(
+                f"  usage guard    calls {guard['calls']}/{guard['maxCalls']} · turns "
+                f"{guard['providerTurns']}/{guard['maxProviderTurns']}"
+            )
+            lines.append(
+                f"  usage cost     charged USD {charged:.2f}/{maximum:.2f} · "
+                f"reserved USD {reserved:.2f} · actual USD {actual:.4f}"
+            )
+            if guard.get("unreportedUSD", 0) > 0:
+                lines.append(
+                    f"  unreported     conservative charge USD {guard['unreportedUSD']:.2f}"
+                )
+        if guard.get("blockedSeconds", 0) > 0:
+            lines.append(
+                f"  provider       BLOCKED · cooldown {duration(guard['blockedSeconds'])} remaining"
+            )
+        usage = guard.get("lastUsage")
+        if isinstance(usage, dict) and usage.get("recordedAt"):
+            lines.append(
+                f"  latest usage   {usage['inputTokens']} in / {usage['outputTokens']} out · "
+                f"cache {usage['cacheReadInputTokens']} read / "
+                f"{usage['cacheCreationInputTokens']} create · USD {usage['costUSD']:.4f}"
+            )
+    return "\n".join(lines)
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--once", action="store_true")
+    parser.add_argument("--json", action="store_true")
+    parser.add_argument("--state-dir", type=Path, default=default_state_dir())
+    parser.add_argument("-n", "--interval", type=float, default=2.0)
+    args = parser.parse_args()
+    if args.interval <= 0:
+        parser.error("--interval must be greater than zero")
+
+    def frame() -> str:
+        data = snapshot(args.state_dir.expanduser())
+        return json.dumps(data, indent=2) if args.json else render(data)
+
+    if args.once or args.json:
+        print(frame())
+        return 0
+
+    max_refreshes = int(os.environ.get("CLAUDE_WORKER_WATCH_MAX_REFRESHES", "0"))
+    refreshes = 0
+    try:
+        print("\033[?25l", end="")
+        while True:
+            output = frame()
+            if refreshes == 0:
+                print("\033[2J", end="")
+            print(f"\033[H{output}\n\033[J", end="", flush=True)
+            refreshes += 1
+            if max_refreshes and refreshes >= max_refreshes:
+                break
+            time.sleep(args.interval)
+    except KeyboardInterrupt:
+        pass
+    finally:
+        print("\033[?25h")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

@@ -29,7 +29,6 @@ jobs:
           if [ "$RUNNER_OS" = macOS ]; then TEST_BASH=/bin/bash; fi
           "$TEST_BASH" tools/codex/test-workflow.sh
           "$TEST_BASH" tools/model-team/test-model-team.sh
-          "$TEST_BASH" tools/opencode/test-workflow.sh
       - name: Validate scripts and configuration
         run: |
           TEST_BASH=bash
@@ -39,11 +38,11 @@ jobs:
             tools/headroom/headroom-watch tools/graphify/graphify-sync.sh \
             tools/graphify/reseed-verify.sh tools/codex/services.sh tools/codex/wsl.sh \
             tools/update-versions.sh \
-            tools/model-team/doctor-model-team.sh tools/model-team/model-team-watch \
-            tools/model-team/test-model-team.sh tools/opencode/doctor-workflow.sh \
-            tools/opencode/install-opencode.sh tools/opencode/test-workflow.sh
-          python3 -m py_compile tools/model-team/codex-worker-mcp tools/model-team/mcp-smoke.py tools/opencode/claude-worker-mcp tools/opencode/mcp-smoke.py
-          jq empty claude/settings.json claude/settings.local.json opencode/opencode.json
+            tools/model-team/doctor-model-team.sh tools/model-team/install-model-team.sh \
+            tools/model-team/test-model-team.sh
+          python3 -m py_compile tools/model-team/claude-worker-mcp \
+            tools/model-team/claude-worker-watch tools/model-team/mcp-smoke.py
+          jq empty claude/settings.json claude/settings.local.json
           python3 - <<'PY'
           from pathlib import Path
           import tomllib
