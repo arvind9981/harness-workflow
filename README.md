@@ -197,10 +197,11 @@ proxy at `127.0.0.1:8787`. Claude workers inherit
 `OPENAI_BASE_URL=http://127.0.0.1:8787/v1` where the active Codex transport
 supports it. ChatGPT subscription/backend traffic may remain native to Codex.
 
-Headroom runs with `--no-cache`, which disables local full-response replay. This
-does not disable provider-side prompt caching. Mempalace stores durable semantic
-memory; prompt caching only avoids reprocessing repeated prompt prefixes, so the
-two mechanisms do not conflict.
+Headroom uses token-priority, marker-free lossless tool-result compression on
+the single `127.0.0.1:8787` endpoint. `--no-cache` disables local full-response
+replay; it does not disable provider-side prompt caching. Mempalace stores
+durable semantic memory; prompt caching only avoids reprocessing repeated prompt
+prefixes, so the two mechanisms do not conflict.
 
 ```bash
 headroom-watch

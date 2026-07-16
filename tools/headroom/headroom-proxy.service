@@ -1,12 +1,12 @@
 [Unit]
-Description=Headroom context-optimization proxy (CCR backend for Claude Code MCP)
+Description=Headroom lossless context-optimization proxy
 Documentation=https://github.com/chopratejas/headroom
 After=network-online.target
 Wants=network-online.target
 
 [Service]
 Type=simple
-ExecStart=%h/.local/bin/headroom proxy --port 8787 --host 127.0.0.1 --mode cache --no-cache
+ExecStart=%h/.local/bin/headroom proxy --port 8787 --host 127.0.0.1 --mode token --no-cache --intercept-tool-results --lossless
 Restart=on-failure
 RestartSec=3
 # The proxy backs the headroom MCP retrieve/compress tools AND serves the

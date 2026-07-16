@@ -220,7 +220,7 @@ fi
 case "$SERVICE_MANAGER" in
   launchd) STATUS_HR="launchctl print gui/$(id -u)/com.user.headroom-proxy" ;;
   systemd) STATUS_HR="systemctl --user status headroom-proxy" ;;
-  *) STATUS_HR="start it manually: headroom proxy --port 8787 --host 127.0.0.1 --mode cache --no-cache" ;;
+  *) STATUS_HR="start it manually: headroom proxy --port 8787 --host 127.0.0.1 --mode token --no-cache --intercept-tool-results --lossless" ;;
 esac
 if [ "${#missing[@]}" -ne 0 ]; then
   if [ "$OS" = "Darwin" ]; then die "install these first: brew install ${missing[*]}"
@@ -550,10 +550,10 @@ if [ "$SERVICE_MANAGER" != none ]; then
   if svc_enable "$REPO_DIR/tools/headroom/headroom-proxy.service" "$REPO_DIR/tools/headroom/com.user.headroom-proxy.plist"; then
     [ "$SERVICE_MANAGER" != systemd ] || info "tip: 'loginctl enable-linger $USER' keeps the proxy alive without an active login"
   else
-    warn "automatic Headroom service setup failed. Run manually: headroom proxy --port 8787 --host 127.0.0.1 --mode cache --no-cache"
+    warn "automatic Headroom service setup failed. Run manually: headroom proxy --port 8787 --host 127.0.0.1 --mode token --no-cache --intercept-tool-results --lossless"
   fi
 else
-  warn "skipped (no service manager). Run manually: headroom proxy --port 8787 --host 127.0.0.1 --mode cache --no-cache"
+  warn "skipped (no service manager). Run manually: headroom proxy --port 8787 --host 127.0.0.1 --mode token --no-cache --intercept-tool-results --lossless"
 fi
 
 # ---------------------------------------------------------------------------

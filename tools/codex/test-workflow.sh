@@ -387,10 +387,17 @@ test_instructions() {
   else
     fail 'repository has no CI verification workflow'
   fi
-  assert_file_contains "$REPO_DIR/tools/headroom/headroom-proxy.service" '--mode cache' 'default Headroom service has an explicit cache policy'
+  assert_file_contains "$REPO_DIR/tools/headroom/headroom-proxy.service" '--mode token' 'systemd Headroom service prioritizes token compression'
+  assert_file_contains "$REPO_DIR/tools/headroom/headroom-proxy.service" '--intercept-tool-results' 'systemd Headroom service intercepts tool results'
+  assert_file_contains "$REPO_DIR/tools/headroom/headroom-proxy.service" '--lossless' 'systemd Headroom service uses marker-free lossless compression'
+  assert_file_not_contains "$REPO_DIR/tools/headroom/headroom-proxy.service" '--mode cache' 'systemd Headroom service does not freeze prior turns'
   assert_file_contains "$REPO_DIR/tools/headroom/headroom-proxy.service" '--no-cache' 'systemd Headroom service disables local response replay'
+  assert_file_contains "$REPO_DIR/tools/headroom/com.user.headroom-proxy.plist" '<string>token</string>' 'launchd Headroom service prioritizes token compression'
+  assert_file_contains "$REPO_DIR/tools/headroom/com.user.headroom-proxy.plist" '<string>--intercept-tool-results</string>' 'launchd Headroom service intercepts tool results'
+  assert_file_contains "$REPO_DIR/tools/headroom/com.user.headroom-proxy.plist" '<string>--lossless</string>' 'launchd Headroom service uses marker-free lossless compression'
+  assert_file_not_contains "$REPO_DIR/tools/headroom/com.user.headroom-proxy.plist" '<string>cache</string>' 'launchd Headroom service does not freeze prior turns'
   assert_file_contains "$REPO_DIR/tools/headroom/com.user.headroom-proxy.plist" '<string>--no-cache</string>' 'launchd Headroom service disables local response replay'
-  assert_file_contains "$REPO_DIR/init.sh" 'headroom proxy --port 8787 --host 127.0.0.1 --mode cache --no-cache' 'manual Headroom fallback preserves the response-cache policy'
+  assert_file_contains "$REPO_DIR/init.sh" 'headroom proxy --port 8787 --host 127.0.0.1 --mode token --no-cache --intercept-tool-results --lossless' 'manual Headroom fallback preserves lossless token compression'
   assert_file_contains "$REPO_DIR/tools/headroom/headroom-canary" '--intercept-tool-results' 'Headroom tool-result experiment is isolated behind an opt-in canary'
   assert_file_contains "$REPO_DIR/tools/headroom/headroom-canary" '--no-cache' 'Headroom canary disables local response replay'
   assert_file_contains "$REPO_DIR/README.md" \
