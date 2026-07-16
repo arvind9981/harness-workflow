@@ -257,6 +257,31 @@ if not seen_mcp:
 PY
 
 if [ "$CODEX_INSTALL_OS" = Darwin ]; then
+  rendered_zshrc="$(mktemp "${TMPDIR:-/tmp}/codex-zshrc.XXXXXX")"
+  python3 - "$HOME/.zshrc" "$REPO_DIR/codex/zshrc-probe.macos" "$rendered_zshrc" <<'PY'
+from pathlib import Path
+import re
+import sys
+
+destination, managed_path, output = map(Path, sys.argv[1:])
+current = destination.read_text(encoding="utf-8") if destination.exists() else ""
+managed = managed_path.read_text(encoding="utf-8").strip()
+block = re.compile(
+    r"^# BEGIN HARNESS CODEX SHELL PROBE$.*?"
+    r"^# END HARNESS CODEX SHELL PROBE$",
+    re.MULTILINE | re.DOTALL,
+)
+
+if block.search(current):
+    updated = block.sub(managed, current, count=1)
+else:
+    updated = managed + ("\n\n" + current if current else "\n")
+
+output.write_text(updated, encoding="utf-8")
+PY
+  install_if_changed "$rendered_zshrc" "$HOME/.zshrc" 0644
+  rm -f "$rendered_zshrc"
+
   CODEX_ENV_BACKUP_SUFFIX=".bak-codex-$STAMP" python3 - \
     "$REPO_DIR/codex/codex.env.macos" "$CODEX_DIR/.env" <<'PY'
 import os
