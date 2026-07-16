@@ -74,7 +74,6 @@ jobs:
         run: |
           bash tools/codex/test-workflow.sh all
           bash tools/model-team/test-model-team.sh all
-          bash tools/opencode/test-workflow.sh all
           bash -n init.sh tools/update-versions.sh tools/**/*.sh
           git diff --check
 

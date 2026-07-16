@@ -1,8 +1,5 @@
 {
   "permissions": {
-    "allow": [
-      "mcp__codex-worker__codex",
-      "mcp__codex-worker__codex-reply"
-    ]
+    "allow": []
   }
 }

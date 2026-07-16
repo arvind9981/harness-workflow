@@ -395,10 +395,10 @@ check_mcp_docker() {
     docker_warn "Docker MCP server lookup failed"
     return
   fi
-  if printf '%s\n' "$servers" | grep -Fqi 'atlassian'; then
-    pass "Atlassian server enabled in profile: $MCP_PROFILE"
+  if printf '%s\n' "$servers" | grep -Eq '[^[:space:]]'; then
+    pass "Docker MCP profile has enabled servers: $MCP_PROFILE"
   else
-    docker_warn "Atlassian server is not enabled in profile: $MCP_PROFILE"
+    docker_warn "Docker MCP profile has no enabled servers: $MCP_PROFILE"
     return
   fi
 

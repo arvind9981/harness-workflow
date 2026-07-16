@@ -448,9 +448,8 @@ if [ -n "$codex_bin" ] || [ -n "$WINDOWS_CODEX_DIR" ]; then
 
   if [ -n "$codex_bin" ]; then
     ok "Codex detected at $codex_bin — hooks/instructions migrated into ~/.codex"
-    CODEX_BIN="$codex_bin" bash "$REPO_DIR/tools/model-team/install-model-team.sh"
     if CODEX_BIN="$codex_bin" bash "$REPO_DIR/tools/model-team/doctor-model-team.sh"; then
-      ok "Claude–Codex model-team verified"
+      ok "Codex-led Sol/Terra/Sonnet/Fable model-team verified"
     else
       warn "Model-team installed; doctor reported local follow-up"
     fi
@@ -469,22 +468,6 @@ elif [ "$INSTALL_CODEX" = 1 ]; then
   die "--codex requested, but no Codex CLI/App was found through portable discovery"
 else
   info "Codex CLI/App not installed — skipping (nothing to migrate)"
-fi
-
-step "OpenCode workflow (auto-detected)"
-# OpenCode keeps its own native Sol/Terra agents. The installer adds the bounded
-# Claude worker MCP used for automatic Sonnet/Fable planning and review, pins
-# both provider paths through Headroom, and preserves unrelated user settings.
-if command -v opencode >/dev/null 2>&1; then
-  bash "$REPO_DIR/tools/opencode/install-opencode.sh"
-  if bash "$REPO_DIR/tools/opencode/doctor-workflow.sh"; then
-    ok "OpenCode workflow verified"
-  else
-    warn "OpenCode workflow installed; doctor reported local follow-up"
-  fi
-  ok "OpenCode detected — native agents, automatic routing, and Claude worker MCP installed"
-else
-  info "opencode not installed — skipping (nothing to migrate)"
 fi
 
 # ---------------------------------------------------------------------------
@@ -700,7 +683,7 @@ ${c_grn}Done.${c_rst}
   ${c_grn}Request flow${c_rst}
   ----------------------------------------------------------------------
      claude / graphify ---------------> headroom :8787 -> Claude
-     codex ---------------------------> headroom :8787 -> native backend
+     codex / Claude workers ----------> headroom :8787 -> model providers
 
      memory: mempalace (local, zero-API)   code graph: graphify
 
@@ -708,7 +691,7 @@ ${c_grn}Done.${c_rst}
   ----------------------------------------------------------------------
      1) ${c_dim}claude${c_rst}                  start Claude Code (auto-installs plugins); log in
      2) ${c_dim}headroom-watch${c_rst}          optional -- watch token compression live
-     3) ${c_dim}model-team-watch${c_rst}         optional -- watch Codex worker activity
+     3) ${c_dim}claude-worker-watch${c_rst}      optional -- watch Sonnet/Fable worker activity
      4) seed memory (one-time):
         ${c_dim}mempalace init "\$HOME" && mempalace mine ~/.claude/projects/ --mode convos${c_rst}
 

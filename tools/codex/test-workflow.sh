@@ -361,21 +361,16 @@ test_instructions() {
   local legacy_label="ChatGPT"" toggle"
   local bridge_binary="claude-code""-proxy"
   local legacy_dir="$REPO_DIR/tools/chatgpt""-toggle"
-  assert_file_contains "$agents" 'Make reasonable, reversible assumptions and proceed without asking.' 'AGENTS defaults to autonomous progress'
-  assert_file_contains "$agents" 'Ask only when the missing decision would materially change the outcome' 'AGENTS limits clarification to material decisions'
+  assert_file_contains "$agents" 'Make reasonable, reversible assumptions and keep' 'AGENTS defaults to autonomous progress'
+  assert_file_contains "$agents" 'ask only when authority, credentials, destructive impact' 'AGENTS limits clarification to material decisions'
   assert_file_not_contains "$agents" 'Ask one focused question when scope is ambiguous' 'AGENTS removes routine clarification prompts'
   assert_file_not_contains "$agents" 'Get explicit approval before additive changes' 'AGENTS removes redundant implementation approval'
-  assert_file_not_contains "$agents" '## Jira' 'AGENTS leaves Jira policy to the on-demand skill'
-  assert_file_not_contains "$agents" 'Transport closed' 'AGENTS does not carry Jira recovery details'
-  assert_file_contains "$REPO_DIR/workflow/skills/jira-live/SKILL.md" 'MCP_DOCKER' 'Jira skill requires live MCP_DOCKER'
-  assert_file_contains "$REPO_DIR/workflow/skills/jira-live/SKILL.md" 'Transport closed' 'Jira skill owns transport recovery'
-  assert_file_contains "$REPO_DIR/workflow/skills/jira-live/SKILL.md" 'Never automatically replay a Jira write' 'Jira skill protects ambiguous writes'
-  assert_file_contains "$agents" 'Use mempalace when the request depends on prior work, decisions, or repo conventions.' 'AGENTS scopes memory recall to relevant tasks'
+  assert_file_contains "$agents" 'Use Mempalace only when prior decisions or durable conventions matter.' 'AGENTS scopes memory recall to relevant tasks'
   assert_file_not_contains "$agents" 'Use mempalace before re-deriving past work' 'AGENTS removes unconditional memory recall'
   assert_file_contains "$agents" 'references/memory-tooling.md' 'AGENTS routes deep memory mechanics to the reference'
   assert_file_contains "$agents" '<!-- BEGIN @agent-native/skills -->' 'AGENTS retains the managed skill marker'
-  assert_file_contains "$agents" 'use /efficient-frontier only when' 'AGENTS scopes efficient-frontier to worthwhile delegation'
-  assert_file_contains "$agents" 'Keep single-file and latency-sensitive work inline.' 'AGENTS keeps small work on the fast path'
+  assert_file_contains "$agents" 'Use `/efficient-frontier`' 'AGENTS scopes efficient-frontier to worthwhile delegation'
+  assert_file_contains "$agents" 'single-file and latency-sensitive work inline.' 'AGENTS keeps small work on the fast path'
   assert_file_not_contains "$agents" 'use the /efficient-frontier skill always.' 'AGENTS removes unconditional frontier delegation'
   if jq -e '.permissions.allow | length <= 10' "$REPO_DIR/claude/settings.local.json" >/dev/null \
       && ! grep -Fq 'Bash(sudo ' "$REPO_DIR/claude/settings.local.json"; then
@@ -453,12 +448,20 @@ test_discovery() {
 
 test_installer() {
   local tmp home codex_dir config first_config_hash first_hooks_hash first_backups
-  local second_config_hash second_hooks_hash second_backups config_backup fresh_dir
+  local second_config_hash second_hooks_hash second_backups config_backup fresh_dir env_file first_env_hash second_env_hash
   tmp="$(mktemp -d "${TMPDIR:-/tmp}/codex-installer.XXXXXX")"
   home="$tmp/home"
   codex_dir="$tmp/codex"
   config="$codex_dir/config.toml"
+  env_file="$codex_dir/.env"
   mkdir -p "$home" "$codex_dir" "$tmp/bin"
+
+  cat > "$env_file" <<'EOF'
+# preserve-this-env-comment
+KEEP_ENV=yes
+PATH=/usr/bin
+EOF
+  chmod 600 "$env_file"
 
   cat > "$config" <<'EOF'
 # preserve-this-comment
@@ -485,7 +488,7 @@ KEEP = "yes"
 EOF
   chmod 600 "$config"
 
-  if HOME="$home" CODEX_DIR="$codex_dir" BIN_DIR="$tmp/bin" \
+  if HOME="$home" CODEX_DIR="$codex_dir" BIN_DIR="$tmp/bin" CODEX_INSTALL_OS=Darwin \
       "$REPO_DIR/tools/codex/install-codex.sh" >/dev/null; then
     pass 'installer completes in an isolated Codex directory'
   else
@@ -527,6 +530,12 @@ PY
     fail 'installer preserves unrelated TOML comments'
   fi
   assert_eq 600 "$(file_mode "$config")" 'installer keeps config.toml private'
+  assert_file_contains "$env_file" '# preserve-this-env-comment' 'macOS installer preserves .env comments'
+  assert_file_contains "$env_file" 'KEEP_ENV=yes' 'macOS installer preserves unrelated .env variables'
+  assert_file_contains "$env_file" \
+    'PATH=/opt/homebrew/bin:/opt/homebrew/sbin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin' \
+    'macOS installer reconciles the Codex Desktop PATH'
+  assert_eq 600 "$(file_mode "$env_file")" 'macOS installer keeps .env private'
 
   config_backup="$(find "$codex_dir" -maxdepth 1 -type f -name 'config.toml.bak-codex-*' | head -n 1)"
   if [ -n "$config_backup" ]; then
@@ -542,21 +551,29 @@ PY
 
   first_config_hash="$(hash_file "$config")"
   first_hooks_hash="$(hash_file "$codex_dir/hooks.json")"
+  first_env_hash="$(hash_file "$env_file")"
   first_backups="$(find "$codex_dir" -type f -name '*.bak-codex-*' | wc -l | tr -d ' ')"
-  HOME="$home" CODEX_DIR="$codex_dir" BIN_DIR="$tmp/bin" \
+  HOME="$home" CODEX_DIR="$codex_dir" BIN_DIR="$tmp/bin" CODEX_INSTALL_OS=Darwin \
     "$REPO_DIR/tools/codex/install-codex.sh" >/dev/null
   second_config_hash="$(hash_file "$config")"
   second_hooks_hash="$(hash_file "$codex_dir/hooks.json")"
+  second_env_hash="$(hash_file "$env_file")"
   second_backups="$(find "$codex_dir" -type f -name '*.bak-codex-*' | wc -l | tr -d ' ')"
 
   assert_eq "$first_config_hash" "$second_config_hash" 'second installer run preserves config hash'
   assert_eq "$first_hooks_hash" "$second_hooks_hash" 'second installer run preserves managed-file hash'
+  assert_eq "$first_env_hash" "$second_env_hash" 'second installer run preserves Codex Desktop env hash'
   assert_eq "$first_backups" "$second_backups" 'second installer run creates no backups'
 
   fresh_dir="$tmp/fresh-codex"
-  HOME="$home" CODEX_DIR="$fresh_dir" BIN_DIR="$tmp/bin" \
+  HOME="$home" CODEX_DIR="$fresh_dir" BIN_DIR="$tmp/bin" CODEX_INSTALL_OS=Linux \
     "$REPO_DIR/tools/codex/install-codex.sh" >/dev/null 2>&1
   assert_eq 600 "$(file_mode "$fresh_dir/config.toml")" 'fresh config.toml is created private'
+  if [ -e "$fresh_dir/.env" ]; then
+    fail 'Linux installer leaves the Codex Desktop env absent'
+  else
+    pass 'Linux installer leaves the Codex Desktop env absent'
+  fi
 
   rm -rf "$tmp"
 }
@@ -765,12 +782,12 @@ EOF
 #!/usr/bin/env bash
 printf 'docker %s\n' "$*" >> "$TEST_LOG"
 if [ "${DOCKER_FAIL_MODE:-0}" = 1 ]; then
-  printf 'xebia atlassian jira_search command failed with exit status 1\n'
+  printf 'profile inventory command failed with exit status 1\n'
   exit 1
 fi
 case "$*" in
   'mcp profile list') printf 'xebia\n' ;;
-  'mcp profile server ls --filter profile=xebia') printf 'atlassian\n' ;;
+  'mcp profile server ls --filter profile=xebia') printf 'example-service\n' ;;
   'mcp tools count --gateway-arg=--profile=xebia --gateway-arg=--tools=mcp-exec') printf '8\n' ;;
   'mcp tools ls --format=list --gateway-arg=--profile=xebia --gateway-arg=--tools=mcp-exec') printf 'mcp-exec\nmcp-find\nmcp-activate-profile\n' ;;
 esac
@@ -786,7 +803,7 @@ EOF
   assert_text_contains "$output" 'PASS MCP_DOCKER enabled in Codex' 'doctor checks Codex MCP enablement'
   assert_text_contains "$output" 'PASS MCP_DOCKER uses dynamic gateway mode' 'doctor checks Docker MCP on-demand isolation'
   assert_text_contains "$output" 'PASS Docker MCP profile available: xebia' 'doctor checks the configured Docker profile'
-  assert_text_contains "$output" 'PASS Atlassian server enabled in profile: xebia' 'doctor checks Atlassian profile membership'
+  assert_text_contains "$output" 'PASS Docker MCP profile has enabled servers: xebia' 'doctor checks generic profile membership'
   assert_text_contains "$output" 'PASS Docker MCP dynamic gateway exposes 8 management tools' 'doctor checks bounded dynamic tool inventory'
   assert_text_contains "$output" 'PASS Docker MCP dynamic gateway includes mcp-exec' 'doctor checks dynamic execution without calling an external tool'
   assert_text_contains "$output" 'PASS workflow repository included in discovery' 'doctor seeds discovery with REPO_DIR'
@@ -795,10 +812,10 @@ EOF
   else
     pass 'doctor removes unconditional CLI-drain warning'
   fi
-  if grep -Eq 'jira_(search|get|create|update|delete)[[:space:]]' "$log"; then
-    fail 'doctor does not invoke a Jira operation'
+  if grep -Fq 'mcp tools call' "$log"; then
+    fail 'doctor does not invoke an external MCP operation'
   else
-    pass 'doctor does not invoke a Jira operation'
+    pass 'doctor does not invoke an external MCP operation'
   fi
   failure_output="$(HOME="$home" CODEX_DIR="$codex_dir" CODEX_BIN="$fake_bin/codex-explicit" \
     CODEX_DOCTOR_RUNTIME=0 TEST_LOG="$log" DOCKER_FAIL_MODE=1 PATH="$fake_bin:/usr/bin:/bin" \
@@ -918,7 +935,8 @@ test_versions() {
     assert_file_contains "$workflow" 'UV_TOOL_DIR' 'version workflow isolates candidate tool installs'
     assert_file_contains "$workflow" 'bash tools/codex/test-workflow.sh all' 'version workflow runs Codex regressions'
     assert_file_contains "$workflow" 'bash tools/model-team/test-model-team.sh all' 'version workflow runs model-team regressions'
-    assert_file_contains "$workflow" 'bash tools/opencode/test-workflow.sh all' 'version workflow runs OpenCode regressions'
+    retired_path='tools/open'"code"
+    assert_file_not_contains "$workflow" "$retired_path" 'version workflow has no retired harness regression path'
     assert_file_contains "$workflow" 'gh pr list' 'version workflow avoids duplicate open PRs'
     assert_file_contains "$workflow" 'gh pr create' 'version workflow opens a review PR'
     assert_file_not_contains "$workflow" 'gh pr merge' 'version workflow never auto-merges'

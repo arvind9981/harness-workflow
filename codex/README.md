@@ -5,8 +5,9 @@ The Codex bootstrap mirrors the repo-maintained parts of the Claude workflow:
 - `AGENTS.md` installs standing Codex instructions.
 - `hooks.json` wires memory recall, graphify-first search nudges, graph refresh,
   session recap, and headroom initialization.
-- `../workflow/skills` installs the shared `$consult`, `$brainstorming`,
-  `karpathy-guidelines`, and other on-demand workflow skills.
+- `../workflow/skills` installs the shared `$model-team`, `$consult`,
+  `$brainstorming`, `karpathy-guidelines`, and other on-demand workflow skills.
+- `agents/` provides the read-only Terra explorer and Sol reviewer profiles.
 - `fast.config.toml` installs as the supported standalone
   `~/.codex/fast.config.toml` profile: `codex --profile fast`.
 - `../tools/codex/install-codex.sh` copies the shared hook scripts into
@@ -20,7 +21,9 @@ The Codex bootstrap mirrors the repo-maintained parts of the Claude workflow:
   `[mcp_servers.MCP_DOCKER]` table is present, the installer keeps its configured
   profile, sets `startup_timeout_sec = 60`, and narrows the exposed catalog to the
   small dynamic-management surface containing `mcp-exec`. Other MCP servers
-  remain unchanged.
+  remain unchanged. It then installs the bounded Claude worker used by the
+  Codex-led model team, so direct and full-bootstrap installs have the same
+  Sol/Terra/Sonnet/Fable topology.
 
 Run it directly:
 

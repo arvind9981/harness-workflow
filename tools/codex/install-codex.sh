@@ -10,6 +10,7 @@ set -euo pipefail
 REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 CODEX_DIR="${CODEX_DIR:-$HOME/.codex}"
 BIN_DIR="${BIN_DIR:-$HOME/.local/bin}"
+CODEX_INSTALL_OS="${CODEX_INSTALL_OS:-$(uname -s)}"
 STAMP="$(date +%Y%m%d-%H%M%S)"
 
 backup() {
@@ -176,7 +177,10 @@ while i < len(lines):
           emit_desired_top(out)
           inserted_top = True
       if section == "shell_environment_policy.set" and not inserted:
+          while out and not out[-1].strip():
+              out.pop()
           emit_desired(out)
+          out.append("")
           inserted = True
       section = next_section
       seen_mcp = seen_mcp or section == mcp_section
@@ -221,6 +225,8 @@ if section == "" and not inserted_top:
     inserted_top = True
 
 if section == "shell_environment_policy.set" and not inserted:
+    while out and not out[-1].strip():
+        out.pop()
     emit_desired(out)
     inserted = True
 
@@ -250,4 +256,60 @@ if not seen_mcp:
     print("install-codex: MCP_DOCKER table not found; startup timeout left unmanaged", file=sys.stderr)
 PY
 
+if [ "$CODEX_INSTALL_OS" = Darwin ]; then
+  CODEX_ENV_BACKUP_SUFFIX=".bak-codex-$STAMP" python3 - \
+    "$REPO_DIR/codex/codex.env.macos" "$CODEX_DIR/.env" <<'PY'
+import os
+import re
+import shutil
+import sys
+import tempfile
+from pathlib import Path
+
+template, destination = map(Path, sys.argv[1:])
+desired = template.read_text(encoding="utf-8").strip()
+current = destination.read_text(encoding="utf-8") if destination.exists() else ""
+pattern = re.compile(r"^\s*(?:export\s+)?PATH\s*=.*$")
+lines = current.splitlines()
+out = []
+inserted = False
+
+for line in lines:
+    if pattern.match(line):
+        if not inserted:
+            out.append(desired)
+            inserted = True
+        continue
+    out.append(line)
+
+if not inserted:
+    out.append(desired)
+
+updated = "\n".join(out).rstrip() + "\n"
+if updated != current:
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    if destination.exists():
+        shutil.copy2(destination, Path(str(destination) + os.environ["CODEX_ENV_BACKUP_SUFFIX"]))
+    fd, temporary = tempfile.mkstemp(prefix=".env.", dir=destination.parent)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.write(updated)
+        os.chmod(temporary, 0o600)
+        os.replace(temporary, destination)
+    finally:
+        if os.path.exists(temporary):
+            os.unlink(temporary)
+else:
+    os.chmod(destination, 0o600)
+PY
+fi
+
 printf 'Codex workflow installed into %s (%s hook/instruction file(s) updated)\n' "$CODEX_DIR" "$CHANGED"
+
+# The model-team helper owns only Codex agent profiles, the bounded Claude MCP
+# entry, and cleanup of the retired Claude-led bridge. Keeping it behind the
+# Codex installer makes direct and full-bootstrap installs behave identically.
+if [ "${CODEX_INSTALL_MODEL_TEAM:-1}" = 1 ]; then
+  CODEX_DIR="$CODEX_DIR" BIN_DIR="$BIN_DIR" \
+    bash "$REPO_DIR/tools/model-team/install-model-team.sh"
+fi

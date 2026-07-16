@@ -15,6 +15,7 @@ Explicit requests and project instructions take precedence.
 - When `graphify-out/graph.json` exists, query Graphify before broad raw search.
 - Treat Headroom as transparent routing. Use live proxy statistics for savings.
 - Load specialized skills and live-service MCPs only when the request needs them.
-- Use the automatic model-team route for complex or high-risk implementation;
-  keep small, mechanical, read-only, and latency-sensitive tasks single-agent.
+- Direct Claude sessions remain single-controller. Codex owns cross-model
+  orchestration; when invoked as a bounded Codex worker, stay read-only and
+  follow the supplied role, scope, and acceptance evidence.
 <!-- END HARNESS-WORKFLOW MANAGED -->

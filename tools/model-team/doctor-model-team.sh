@@ -4,145 +4,94 @@ set -u
 
 REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 # shellcheck source=tools/codex/lib.sh
+# shellcheck disable=SC1091
 . "$REPO_DIR/tools/codex/lib.sh"
 
-CLAUDE_DIR="${CLAUDE_DIR:-$HOME/.claude}"
-CLAUDE_CONFIG_FILE="${CLAUDE_CONFIG_FILE:-$HOME/.claude.json}"
-CLAUDE_SETTINGS_LOCAL_FILE="${CLAUDE_SETTINGS_LOCAL_FILE:-$CLAUDE_DIR/settings.local.json}"
-CODEX_CONFIG_FILE="${CODEX_CONFIG_FILE:-${CODEX_HOME:-$HOME/.codex}/config.toml}"
+CODEX_DIR="${CODEX_DIR:-${CODEX_HOME:-$HOME/.codex}}"
 BIN_DIR="${BIN_DIR:-$HOME/.local/bin}"
-WORKER_WRAPPER="${MODEL_TEAM_WORKER_WRAPPER:-$(command -v codex-worker-mcp 2>/dev/null || true)}"
-[ -n "$WORKER_WRAPPER" ] || WORKER_WRAPPER="$BIN_DIR/codex-worker-mcp"
+RUNTIME="${MODEL_TEAM_DOCTOR_RUNTIME:-1}"
 PASS=0
 WARN=0
 FAIL=0
 
-pass() { printf 'PASS %s\n' "$1"; PASS=$((PASS + 1)); }
-warn() { printf 'WARN %s\n' "$1"; WARN=$((WARN + 1)); }
-fail() { printf 'FAIL %s\n' "$1" >&2; FAIL=$((FAIL + 1)); }
+pass() { PASS=$((PASS + 1)); printf 'PASS %s\n' "$1"; }
+warn() { WARN=$((WARN + 1)); printf 'WARN %s\n' "$1"; }
+fail() { FAIL=$((FAIL + 1)); printf 'FAIL %s\n' "$1" >&2; }
 
-codex_bin="$(codex_resolve_bin || true)"
-python_bin="$(codex_python_resolve || true)"
+python_bin="$(codex_python_resolve || command -v python3 || true)"
+config="$CODEX_DIR/config.toml"
+wrapper="$BIN_DIR/claude-worker-mcp"
+watcher="$BIN_DIR/claude-worker-watch"
 
-if [ -f "$CLAUDE_DIR/skills/model-team/SKILL.md" ]; then
-  pass 'model-team skill installed'
+if [ -f "$CODEX_DIR/skills/model-team/SKILL.md" ]; then
+  pass 'Codex model-team skill installed'
 else
-  fail 'model-team skill missing'
+  fail 'Codex model-team skill missing'
 fi
-if [ -f "$CLAUDE_DIR/agents/model-team-architect.md" ] \
-  && grep -Fq 'model: fable' "$CLAUDE_DIR/agents/model-team-architect.md" \
-  && grep -Fq 'tools: Read, Grep, Glob' "$CLAUDE_DIR/agents/model-team-architect.md"; then
-  pass 'Fable architect agent installed'
-else
-  fail 'Fable architect agent missing or not read-only'
-fi
-if [ -f "$CLAUDE_DIR/skills/jira-live/SKILL.md" ]; then
-  pass 'jira-live skill installed'
-else
-  fail 'jira-live skill missing'
-fi
+for agent in terra-explorer sol-reviewer; do
+  if [ -f "$CODEX_DIR/agents/$agent.toml" ]; then
+    pass "$agent agent installed"
+  else
+    fail "$agent agent missing"
+  fi
+done
+if [ -x "$wrapper" ]; then pass 'Claude MCP worker installed'; else fail 'Claude MCP worker missing'; fi
+if [ -x "$watcher" ]; then pass 'Claude worker watcher installed'; else fail 'Claude worker watcher missing'; fi
 
-if command -v model-team-watch >/dev/null 2>&1; then
-  pass 'model-team-watch is installed'
-else
-  fail 'model-team-watch is missing from PATH'
-fi
-if [ -x "$WORKER_WRAPPER" ]; then
-  pass 'instrumented Codex MCP wrapper is installed'
-else
-  fail 'instrumented Codex MCP wrapper is missing'
-fi
-
-if [ -n "$codex_bin" ] && [ -n "$python_bin" ] && [ -f "$CLAUDE_CONFIG_FILE" ] \
-  && "$python_bin" - "$CLAUDE_CONFIG_FILE" "$python_bin" \
-    "$WORKER_WRAPPER" "$codex_bin" <<'PY'
-import json
-import sys
-
-config = json.load(open(sys.argv[1]))
-worker = config.get("mcpServers", {}).get("codex-worker", {})
-assert worker.get("command") == sys.argv[2]
-assert worker.get("args") == [sys.argv[3], "--codex-bin", sys.argv[4]]
-PY
-then
-  pass 'codex-worker MCP registration uses the isolated wrapper'
-else
-  fail 'codex-worker MCP registration is missing or drifted'
-fi
-
-worker_home=""
-if [ -n "$codex_bin" ] && [ -n "$python_bin" ] && [ -x "$WORKER_WRAPPER" ]; then
-  worker_home="$(MODEL_TEAM_PRIMARY_CODEX_HOME="${CODEX_HOME:-$(dirname "$CODEX_CONFIG_FILE")}" \
-    "$python_bin" "$WORKER_WRAPPER" --codex-bin "$codex_bin" --prepare-only 2>/dev/null || true)"
-fi
-if [ -n "$worker_home" ] && [ -f "$worker_home/config.toml" ] \
-  && CODEX_HOME="$worker_home" CODEX_SQLITE_HOME="$worker_home" \
-    "$codex_bin" mcp list 2>/dev/null | grep -Fq 'No MCP servers configured'; then
-  pass 'Codex worker has zero inner MCP servers'
-else
-  fail 'Codex worker inherited one or more inner MCP servers'
-fi
-case "$worker_home" in
-  */model-team/codex-homes/*) rm -rf "$worker_home" ;;
-esac
-
-worker_model=""
-if [ -n "$python_bin" ] && [ -f "$CODEX_CONFIG_FILE" ]; then
-  worker_model="$($python_bin - "$CODEX_CONFIG_FILE" <<'PY' 2>/dev/null || true
-import sys
-import tomllib
-
+claude_bin="${CLAUDE_BIN:-$(command -v claude 2>/dev/null || true)}"
+if [ -n "$python_bin" ] && [ -f "$config" ]; then
+  parsed="$($python_bin - "$config" <<'PY' 2>/dev/null || true
+import json, sys, tomllib
 with open(sys.argv[1], "rb") as handle:
-    print(tomllib.load(handle).get("model", ""))
+    worker = tomllib.load(handle).get("mcp_servers", {}).get("claude-worker", {})
+print(json.dumps(worker))
 PY
 )"
-fi
-if [ "$worker_model" = 'gpt-5.6-sol' ]; then
-  pass 'Codex worker default model is gpt-5.6-sol'
-elif [ -n "$worker_model" ]; then
-  warn "Codex worker default model is $worker_model, not gpt-5.6-sol"
 else
-  warn 'Codex worker default model is machine-managed or unavailable'
+  parsed=""
 fi
 
-if [ -n "$python_bin" ] && [ -f "$CLAUDE_SETTINGS_LOCAL_FILE" ] \
-  && "$python_bin" - "$CLAUDE_SETTINGS_LOCAL_FILE" <<'PY'
-import json
-import sys
-
-settings = json.load(open(sys.argv[1]))
-allow = settings.get("permissions", {}).get("allow", [])
-assert "mcp__codex-worker__codex" in allow
-assert "mcp__codex-worker__codex-reply" in allow
+if [ -n "$parsed" ] && "$python_bin" - "$parsed" "$python_bin" "$wrapper" <<'PY'
+import json, sys
+worker = json.loads(sys.argv[1])
+assert worker.get("command") == sys.argv[2]
+args = worker.get("args")
+assert isinstance(args, list) and args and args[0] == sys.argv[3]
+assert worker.get("enabled") is True
+assert worker.get("tool_timeout_sec", 0) >= 1800
 PY
 then
-  pass 'Codex worker permissions are installed'
+  pass 'Codex claude-worker MCP registration is current'
+  configured_claude="$($python_bin - "$parsed" <<'PY'
+import json, sys
+args = json.loads(sys.argv[1]).get("args", [])
+print(args[args.index("--claude-bin") + 1] if "--claude-bin" in args else "")
+PY
+)"
+  [ -n "$configured_claude" ] && claude_bin="$configured_claude"
 else
-  fail 'Codex worker permissions are missing'
+  fail 'Codex claude-worker MCP registration is missing or drifted'
 fi
 
-health="$(curl -fsS --max-time 3 "${HEADROOM_HEALTH_URL:-http://127.0.0.1:8787/health}" 2>/dev/null || true)"
-if printf '%s\n' "$health" | grep -Eq '"status"[[:space:]]*:[[:space:]]*"healthy"' \
-  && printf '%s\n' "$health" | grep -Eq '"ready"[[:space:]]*:[[:space:]]*true'; then
-  pass 'Headroom proxy is healthy'
+if [ -n "$claude_bin" ] && [ -x "$claude_bin" ]; then
+  pass "Claude CLI available at $claude_bin"
+  if [ -n "$python_bin" ] && "$python_bin" "$REPO_DIR/tools/model-team/mcp-smoke.py" \
+      --worker "$wrapper" --claude-bin "$claude_bin" 2>/dev/null | grep -Fq 'claude,claude-reply'; then
+    pass 'Claude MCP exposes claude and claude-reply'
+  else
+    fail 'Claude MCP handshake failed'
+  fi
 else
-  fail 'Headroom proxy health check failed'
+  warn 'Claude CLI unavailable; Sonnet/Fable workers remain dormant'
 fi
 
-if command -v mempalace >/dev/null 2>&1 && command -v mempalace-mcp >/dev/null 2>&1; then
-  pass 'Mempalace CLI and MCP are available'
-else
-  fail 'Mempalace CLI or MCP is unavailable'
-fi
-
-if [ -n "$codex_bin" ] && [ -n "$python_bin" ] \
-  && [ -x "$WORKER_WRAPPER" ] \
-  && "$python_bin" "$REPO_DIR/tools/model-team/mcp-smoke.py" --codex-bin "$codex_bin" \
-    --worker-wrapper "$WORKER_WRAPPER" 2>/dev/null \
-    | grep -Fq 'codex,codex-reply'; then
-  pass 'Codex MCP exposes codex and codex-reply'
-else
-  fail 'Codex MCP handshake failed'
+if [ "$RUNTIME" = 1 ]; then
+  health="$(curl -fsS --max-time 3 "${HEADROOM_HEALTH_URL:-http://127.0.0.1:8787/health}" 2>/dev/null || true)"
+  if printf '%s\n' "$health" | grep -Eq '"status"[[:space:]]*:[[:space:]]*"healthy"'; then
+    pass 'Headroom proxy is healthy for Claude worker traffic'
+  else
+    warn 'Headroom proxy is not healthy; Claude worker routing needs attention'
+  fi
 fi
 
 printf '\nModel-team doctor: %s pass, %s warn, %s fail\n' "$PASS" "$WARN" "$FAIL"
