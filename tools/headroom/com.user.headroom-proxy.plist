@@ -17,8 +17,10 @@
     <string>--host</string>
     <string>127.0.0.1</string>
     <string>--mode</string>
-    <string>cache</string>
+    <string>token</string>
     <string>--no-cache</string>
+    <string>--intercept-tool-results</string>
+    <string>--lossless</string>
   </array>
   <!-- launchd does not inherit the login shell PATH; spell it out so uv-installed
        tools and Homebrew binaries resolve. -->

@@ -197,10 +197,11 @@ proxy at `127.0.0.1:8787`. Claude workers inherit
 `OPENAI_BASE_URL=http://127.0.0.1:8787/v1` where the active Codex transport
 supports it. ChatGPT subscription/backend traffic may remain native to Codex.
 
-Headroom runs with `--no-cache`, which disables local full-response replay. This
-does not disable provider-side prompt caching. Mempalace stores durable semantic
-memory; prompt caching only avoids reprocessing repeated prompt prefixes, so the
-two mechanisms do not conflict.
+Headroom uses token-priority, marker-free lossless tool-result compression on
+the single `127.0.0.1:8787` endpoint. `--no-cache` disables local full-response
+replay; it does not disable provider-side prompt caching. Mempalace stores
+durable semantic memory; prompt caching only avoids reprocessing repeated prompt
+prefixes, so the two mechanisms do not conflict.
 
 ```bash
 headroom-watch
@@ -235,7 +236,9 @@ Docker profile and skips optional Docker integration cleanly when unavailable.
 
 - macOS uses `launchd` user agents.
 - Linux uses `systemd --user` when available.
-- On WSL, it uses `systemd --user` when available and otherwise prints manual service commands.
+- WSL with systemd uses the same systemd user unit as native Linux.
+- Without a functioning systemd user manager, `init.sh` skips automatic service
+  setup and explains how to enable systemd and restart WSL.
 - The optional Windows Codex App bridge renders WSL-aware hook and MCP commands without copying Linux-specific configuration into the Windows Codex home.
 
 Repository locations are discovered or explicitly supplied; nothing requires
