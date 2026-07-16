@@ -13,46 +13,26 @@ services remain on demand so unrelated tool schemas do not consume context.
 ## How work flows
 
 ```mermaid
-sequenceDiagram
-    actor User
-    participant C as Codex / Sol controller
-    participant T as Terra explorer
-    participant S as Sonnet advisor
-    participant F as Fable architect
-    participant R as Repository and tests
+flowchart TD
+    U([Task]) --> C[Codex / Sol controller]
+    C --> D{Complexity and risk}
 
-    User->>C: Request
-    C->>C: Score scope, coupling, ambiguity, blast radius, reversibility, verification
+    D -->|Low| W
+    D -->|Standard| P[Optional Terra reconnaissance<br/>Optional Sonnet advice]
+    D -->|High| A[Fable architecture<br/>and acceptance gates]
 
-    alt Score 0-2: small or latency-sensitive
-        C->>R: Inspect, implement if requested, run one proportional check
-    else Score 3-6: standard team
-        opt Independent repository question exists
-            C->>T: Bounded read-only reconnaissance
-            T-->>C: Distilled evidence
-        end
-        opt Independent judgment materially reduces uncertainty
-            C->>S: One bounded advice call
-            S-->>C: Decision, risks, acceptance checks
-        end
-        C->>R: Implement as the only writer and verify
-        opt Meaningful behavior or ambiguous evidence
-            C->>S: Review actual diff and evidence
-            S-->>C: Actionable findings only
-        end
-    else Score 7-12: high risk
-        C->>F: Architecture, stop conditions, acceptance gates
-        F-->>C: Read-only plan
-        opt Missing repository evidence
-            C->>T: At most two independent read-only investigations
-            T-->>C: Distilled evidence
-        end
-        C->>R: Implement as the only writer and verify
-        C->>F: Review actual diff and command evidence
-        F-->>C: Accept, repair, replan, or block
-    end
+    P --> W
+    A --> W
 
-    C-->>User: Result, verification evidence, and remaining risk
+    W[Codex implements or troubleshoots<br/>Only writer] --> V[Proportional verification]
+    V --> R{Independent review needed?}
+
+    R -->|No| O([Result and evidence])
+    R -->|Routine| N[Sol or Sonnet review]
+    R -->|Critical| F[Fable review]
+
+    N --> O
+    F --> O
 ```
 
 Codex remains capable of full troubleshooting and repository access under the
