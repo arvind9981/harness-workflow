@@ -431,6 +431,62 @@ check_mcp_docker() {
   fi
 }
 
+check_headroom_details() {
+  local health stats mode profile metrics
+  local direct_saved direct_before direct_pct
+  local tool_saved tool_requests cache_hit cache_read cache_discount
+
+  if ! have jq; then
+    warn "headroom optimization details unavailable (jq missing)"
+    return
+  fi
+
+  health="$(curl -fsS --max-time 5 http://127.0.0.1:8787/health 2>/dev/null)" || {
+    warn "headroom optimization details unavailable"
+    return
+  }
+  stats="$(curl -fsS --max-time 5 http://127.0.0.1:8787/stats 2>/dev/null)" || {
+    warn "headroom optimization details unavailable"
+    return
+  }
+
+  profile="$(printf '%s\n' "$health" | jq -er \
+    '.config.savings_profile | select(type == "string" and length > 0)' 2>/dev/null)" || {
+    warn "headroom optimization details unavailable"
+    return
+  }
+  mode="$(printf '%s\n' "$stats" | jq -er \
+    '.summary.mode | select(type == "string" and length > 0)' 2>/dev/null)" || {
+    warn "headroom optimization details unavailable"
+    return
+  }
+  metrics="$(printf '%s\n' "$stats" | jq -er '[
+    (.tokens.proxy_compression_saved // 0),
+    (.tokens.proxy_total_before_compression // 0),
+    (.tokens.proxy_savings_percent // 0),
+    (.savings.by_layer.tool_search.tokens_saved // 0),
+    (.savings.by_layer.tool_search.requests // 0),
+    (.prefix_cache.totals.hit_rate // 0),
+    (.prefix_cache.totals.cache_read_tokens // 0),
+    (.prefix_cache.totals.net_savings_usd // 0)
+  ] | @tsv' 2>/dev/null)" || {
+    warn "headroom optimization details unavailable"
+    return
+  }
+  IFS=$'\t' read -r direct_saved direct_before direct_pct tool_saved tool_requests \
+    cache_hit cache_read cache_discount <<EOF
+$metrics
+EOF
+
+  pass "headroom active policy mode=$mode profile=$profile"
+  if [ "$mode" != cache ] || [ "$profile" != coding ]; then
+    warn "headroom policy differs from repository-managed mode=cache profile=coding (observed mode=$mode profile=$profile)"
+  fi
+  pass "headroom direct compression: $direct_saved/$direct_before tokens ($direct_pct%)"
+  pass "headroom tool-schema deferral: $tool_saved tokens across $tool_requests requests"
+  pass "provider-observed prefix cache: $cache_hit% token hit rate, $cache_read read tokens, \$$cache_discount net discount"
+}
+
 check_headroom() {
   check_command headroom
 
@@ -446,6 +502,7 @@ check_headroom() {
     if curl -fsS --max-time 5 http://127.0.0.1:8787/livez >/dev/null 2>&1 \
       && curl -fsS --max-time 5 http://127.0.0.1:8787/readyz >/dev/null 2>&1; then
       pass "headroom proxy live and ready on 127.0.0.1:8787"
+      check_headroom_details
       return
     fi
     sleep 1
