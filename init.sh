@@ -82,9 +82,9 @@ CLAUDE_DIR="$HOME/.claude"
 BIN_DIR="$HOME/.local/bin"
 UNIT_DIR="$HOME/.config/systemd/user"      # systemd user units (Linux)
 LAUNCH_DIR="$HOME/Library/LaunchAgents"    # launchd LaunchAgents (macOS)
-HEADROOM_VERSION="${HEADROOM_VERSION:-0.31.0}"
-MEMPALACE_VERSION="${MEMPALACE_VERSION:-3.5.0}"
-GRAPHIFY_VERSION="${GRAPHIFY_VERSION:-0.9.16}"
+HEADROOM_VERSION="${HEADROOM_VERSION:-0.32.1}"
+MEMPALACE_VERSION="${MEMPALACE_VERSION:-3.6.0}"
+GRAPHIFY_VERSION="${GRAPHIFY_VERSION:-0.9.20}"
 
 # Repos whose code graph is reseeded into mempalace (one graphify_<repo> wing
 # each, wipe-and-replace from graphify-out/GRAPH_REPORT.md), refreshed by the

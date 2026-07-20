@@ -252,9 +252,9 @@ upgrading machines.
 
 | Tool | Pinned version |
 |---|---:|
-| Headroom | 0.31.0 |
-| Mempalace | 3.5.0 |
-| Graphify | 0.9.16 |
+| Headroom | 0.32.1 |
+| Mempalace | 3.6.0 |
+| Graphify | 0.9.20 |
 
 Check or apply available versions locally:
 

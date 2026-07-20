@@ -419,9 +419,9 @@ test_instructions() {
   else
     fail 'tracked Claude local settings contain personal command history'
   fi
-  assert_file_contains "$REPO_DIR/init.sh" 'HEADROOM_VERSION="${HEADROOM_VERSION:-0.31.0}"' 'init pins the default Headroom version'
-  assert_file_contains "$REPO_DIR/init.sh" 'MEMPALACE_VERSION="${MEMPALACE_VERSION:-3.5.0}"' 'init pins the default Mempalace version'
-  assert_file_contains "$REPO_DIR/init.sh" 'GRAPHIFY_VERSION="${GRAPHIFY_VERSION:-0.9.16}"' 'init pins the default Graphify version'
+  assert_file_contains "$REPO_DIR/init.sh" 'HEADROOM_VERSION="${HEADROOM_VERSION:-0.32.1}"' 'init pins the default Headroom version'
+  assert_file_contains "$REPO_DIR/init.sh" 'MEMPALACE_VERSION="${MEMPALACE_VERSION:-3.6.0}"' 'init pins the default Mempalace version'
+  assert_file_contains "$REPO_DIR/init.sh" 'GRAPHIFY_VERSION="${GRAPHIFY_VERSION:-0.9.20}"' 'init pins the default Graphify version'
   assert_file_contains "$REPO_DIR/init.sh" 'BEGIN HARNESS-WORKFLOW MANAGED' 'init reconciles a managed Claude instruction block'
   if [ -f "$REPO_DIR/.github/workflows/verify.yml" ]; then
     pass 'repository has a portable verification workflow'
